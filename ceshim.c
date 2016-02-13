@@ -8,6 +8,55 @@
 #include "pager.h"
 #include "btreeInt.h"
 
+#define CESHIM_MAX_OFFSET_ENTRIES 10
+
+typedef u16 CeshimCompressedSize;
+typedef u16 CeshimCompressedOffset;
+
+/*
+ ** The header string that appears at the beginning of every
+ ** SQLite database.
+ */
+static const char zMagicHeader[] = SQLITE_FILE_HEADER;
+
+/*
+** Keeps track of uncompress to compressed pager page mappings.
+** In memory during writing. Needs to be persisted when db is closed.
+*/
+typedef struct ceshim_pagemap_entry ceshim_pagemap_entry;
+struct __attribute__ ((__packed__)) ceshim_pagemap_entry {
+  Pgno srcPgno;
+  Pgno dstPgno;
+};
+typedef struct ceshim_pagemap ceshim_pagemap;
+struct __attribute__ ((__packed__)) ceshim_pagemap {
+  u8 nCount;                            // 01 number of pagemap entries in use
+  Pgno currPgno;                        // 04 curr dst pgno being filled
+  CeshimCompressedOffset currPageOfst;  // 02 curr offset for next src page
+  ceshim_pagemap_entry entries[11];     // 88 page mappings
+  unsigned char reserved[5];            // 05 pad structure to 100 bytes
+};
+
+/*
+** Each page will have header for mapping source offset to correct compressed sub-page.
+** Each entry will be a pair of source offset (u64) and size of compressed page (u16).
+** Therefore the header size is (8 bytes + 2 bytes) * 10 entries = 100 bytes.
+*/
+typedef struct ceshim_offset_entry ceshim_offset_entry;
+struct __attribute__ ((__packed__)) ceshim_offset_entry {
+  sqlite3_uint64 offset;               /* 08 Offset from read request for top-level pager */
+  CeshimCompressedSize pageSize;       /* 02 Size of compressed page */
+};
+typedef struct CeshimMemPage CeshimMemPage;
+struct CeshimMemPage {
+  DbPage *pDbPage;                     /* Pager page handle */
+  Pgno pgno;                           /* The pgno to which this belongs */
+  u8 dbHdrOffset;                      /* Offset to the beginning of the header */
+  u8 pgHdrOffset;                      /* Offset to the beginning of the data */
+  u8 *aData;                           /* Pointer to disk image of the page data */
+  ceshim_offset_entry *offsetEntries;
+};
+
 /*
 ** An instance of this structure is attached to the each trace VFS to
 ** provide auxiliary information.
@@ -26,6 +75,9 @@ struct ceshim_info {
 
   const char *zVfsName;               /* Name of this VFS */
   sqlite3_vfs *pCeshimVfs;            /* Pointer back to the ceshim VFS */
+  ceshim_pagemap pagemap;             /* Page mapping data */
+  CeshimMemPage *pPage1;              /* Page 1 of the pager */
+  Pgno lgstPgno;                      /* The largest page number in src pager */
 };
 
 /*
@@ -33,13 +85,14 @@ struct ceshim_info {
 */
 typedef struct ceshim_file ceshim_file;
 struct ceshim_file {
-  sqlite3_file base;        /* Base class.  Must be first */
-  ceshim_info *pInfo;       /* Custom info for this file */
-  const char *zFName;       /* Base name of the file */
-  sqlite3_file *pReal;      /* The real underlying file */
-  unsigned char zDbHeader[100];
+  sqlite3_file base;                /* Base class.  Must be first */
+  ceshim_info *pInfo;               /* Custom info for this file */
+  const char *zFName;               /* Base name of the file */
+  sqlite3_file *pReal;              /* The real underlying file */
+
+  Pager *pPager;                    /* Pager for I/O with compressed/encrypted file */
   u32 pageSize;
-  Pager *pPager;            /* Pager for I/O with compressed/encrypted file */
+  u32 usableSize;                   /* Number of usable bytes on each page */
 };
 
 /*
@@ -192,6 +245,194 @@ static void strappend(char *z, int *pI, const char *zAppend){
   *pI = i;
 }
 
+static int ceshimReadUncompressed(
+  Pager *pPager,
+  Pgno pgno,
+  CeshimCompressedOffset offset,
+  void *zBuf,
+  int iAmt
+){
+  int rc;
+  DbPage *pPage;
+  if( (rc = sqlite3PagerGet(pPager, pgno, &pPage, 0)) == SQLITE_OK ){
+    void *data = sqlite3PagerGetData(pPage);
+    memcpy(zBuf, data+offset, iAmt);
+    sqlite3PagerUnref(pPage);
+  }
+  return rc;
+}
+
+static int ceshimWriteUncompressed(
+  Pager* pPager,
+  Pgno pgno,
+  CeshimCompressedOffset offset,
+  const void *zBuf,
+  int iAmt
+){
+  int rc;
+  DbPage *pPage;
+  if( (rc = sqlite3PagerGet(pPager, pgno, &pPage, 0)) == SQLITE_OK ){
+    void *data = sqlite3PagerGetData(pPage);
+    if( (rc = sqlite3PagerWrite(pPage)) == SQLITE_OK ){
+      memcpy(data+offset, zBuf, iAmt);
+    }
+    sqlite3PagerUnref(pPage);
+  }
+  return rc;
+}
+
+static CeshimMemPage *memPageFromDbPage(DbPage *pDbPage, Pgno srcPgno, Pgno mappedPgno){
+  CeshimMemPage* pPg = (CeshimMemPage *)sqlite3PagerGetExtra(pDbPage);
+  if(mappedPgno != pPg->pgno  ){
+    pPg->pgno = mappedPgno;
+    pPg->pDbPage = pDbPage;
+    pPg->dbHdrOffset = mappedPgno==1 ? 100 : 0;
+    pPg->pgHdrOffset = sizeof(ceshim_offset_entry) * CESHIM_MAX_OFFSET_ENTRIES; //100
+    pPg->pDbPage->pgno = mappedPgno; // pager uses this to determine pager size
+    pPg->offsetEntries = sqlite3_malloc(pPg->pgHdrOffset); /* TODO: FREE */
+
+    // restore compressed pages offset data
+    ceshimReadUncompressed(pDbPage->pPager, mappedPgno, pPg->dbHdrOffset, pPg->offsetEntries, pPg->pgHdrOffset);
+    // restored nothing? init new table
+    if( pPg->offsetEntries[0].offset == 0 && pPg->offsetEntries[0].pageSize == 0 )
+      memset(pPg->offsetEntries, 0xFF, pPg->pgHdrOffset); /* offset 0xFFFFFFFFFFFFFFFF means not in use. 0 is a valid offset. */
+  }
+  pPg->aData = sqlite3PagerGetData(pDbPage);
+  return pPg;
+}
+
+static int ceshimNewDatabase(ceshim_file *pFile){
+  CeshimMemPage *pP1;
+  unsigned char *data;
+  int rc;
+  ceshim_info *pInfo = pFile->pInfo;
+
+  pP1 = pInfo->pPage1;
+  data = pP1->aData;
+  rc = sqlite3PagerWrite(pP1->pDbPage);
+  if( rc ) return rc;
+  // since we are using a secondary pager, set up a proper pager header (see btree.c:1898)
+  memcpy(data, zMagicHeader, sizeof(zMagicHeader));
+  assert( sizeof(zMagicHeader)==16 );
+  data[16] = (u8)((pFile->pageSize>>8)&0xff);
+  data[17] = (u8)((pFile->pageSize>>16)&0xff);
+  data[18] = 1;
+  data[19] = 1;
+  assert( pBt->usableSize<=pBt->pageSize && pBt->usableSize+255>=pBt->pageSize);
+  data[20] = (u8)(pFile->pageSize - pFile->usableSize);
+  data[21] = 64;
+  data[22] = 32;
+  data[23] = 32;
+  memset(&data[24], 0, 100-24);
+  data[31] = 1; // 28-31 size of the database file in pages
+  return SQLITE_OK;
+}
+
+static CeshimCompressedOffset ceshimGetPageOffset(
+  const ceshim_file *p,
+  const CeshimMemPage *pMemPage,
+  sqlite_uint64 uSrcOfst,
+  CeshimCompressedSize *sz
+){
+  assert( pMemPage );
+  assert( pMemPage->offsetEntries );
+
+  CeshimCompressedOffset ofst = 0; //pMemPage->pgHdrOffset;
+  if ( sz ) *sz = 0;
+
+  CeshimCompressedOffset prev = 0;
+  for(u8 i=0; i<CESHIM_MAX_OFFSET_ENTRIES; i++){
+    if( pMemPage->offsetEntries[i].offset <= uSrcOfst ) {
+      ofst += prev;
+      prev = pMemPage->offsetEntries[i].pageSize;
+      if( sz ){
+        *sz = pMemPage->offsetEntries[i].pageSize;
+      }
+    } else break;
+  }
+  return ofst;
+}
+
+static int ceshimSetPageOffset(const CeshimMemPage *pMemPage, ceshim_file *p, sqlite_int64 iSrcOfst, CeshimCompressedSize size){
+  assert( pMemPage );
+  int rc = SQLITE_OK;
+  for(u8 i=0; i<CESHIM_MAX_OFFSET_ENTRIES; i++){
+    if( pMemPage->offsetEntries[i].offset == iSrcOfst ) {
+      if( pMemPage->offsetEntries[i].pageSize < size ) {
+        CeshimCompressedOffset delta = size - pMemPage->offsetEntries[i].pageSize;
+        pMemPage->offsetEntries[i].pageSize = size;
+        ceshim_info *pInfo = p->pInfo;
+        ceshim_pagemap *pagemap = &pInfo->pagemap;
+        pagemap->currPageOfst += delta;
+      }
+      return rc;
+    }
+  }
+  for(u8 i=0; i<CESHIM_MAX_OFFSET_ENTRIES; i++){
+    if( pMemPage->offsetEntries[i].offset == 0xFFFFFFFFFFFFFFFF ){
+      pMemPage->offsetEntries[i].offset = iSrcOfst;
+      pMemPage->offsetEntries[i].pageSize = size;
+      rc = ceshimWriteUncompressed(
+        pMemPage->pDbPage->pPager,
+        pMemPage->pgno,
+        pMemPage->dbHdrOffset,
+        &pMemPage->offsetEntries,
+        pMemPage->pgHdrOffset
+      );
+      break;
+    }
+  }
+  return rc;
+}
+
+static int ceshimSetMappedPgno(const ceshim_file *p, sqlite3_uint64 iOfst, Pgno dstPgno, CeshimCompressedSize uSz){
+  ceshim_pagemap *pagemap = &p->pInfo->pagemap;
+  if( pagemap->nCount++ < 10 ){
+    pagemap->currPageOfst += uSz;
+    Pgno srcPgno = (Pgno)(iOfst/p->pageSize+1);
+    pagemap->entries[pagemap->nCount].srcPgno = srcPgno;
+    pagemap->entries[pagemap->nCount].dstPgno = dstPgno;
+    return ceshimWriteUncompressed(p->pPager, 1, sizeof(*pagemap), (void *)pagemap, 100);
+  }
+  return SQLITE_ERROR;
+}
+
+static int ceshimGetPageNos(
+  const ceshim_file *p,
+  sqlite_uint64 iOfst,
+  Pgno *srcPgno,
+  Pgno *mappedPgno
+){
+  assert(mappedPgno);
+  Pgno _srcPgno = (Pgno)(iOfst/p->pageSize+1);
+  if (srcPgno) *srcPgno = _srcPgno;
+  ceshim_pagemap *pagemap = &p->pInfo->pagemap;
+  for(int i=0; i<pagemap->nCount; i++){
+    if( pagemap->entries[i].srcPgno == _srcPgno ){
+      *mappedPgno = pagemap->entries[i].dstPgno;
+      return SQLITE_OK;
+    }
+  }
+  /*
+  if( iOfst < p->pageSize ){
+    *mappedPgno = 1;
+//    ceshimSetMappedPgno(p, iOfst, 1);
+    return SQLITE_OK;
+  }*/
+  return SQLITE_ERROR;
+}
+
+static Pgno ceshimGetUnmappedDstPgno(const ceshim_file *p, sqlite_uint64 iOfst, CeshimCompressedSize uSz){
+  assert( getMappedPgno(p, iOfst, outPgno) == SQLITE_ERROR );
+  ceshim_pagemap *pagemap = &p->pInfo->pagemap;
+  if( pagemap->currPageOfst+uSz > p->pageSize ){
+    pagemap->currPageOfst = 0;
+    pagemap->currPgno++;
+  }
+  ceshimSetMappedPgno(p, iOfst, pagemap->currPgno, uSz);
+  return pagemap->currPgno;
+}
+
 /*
 ** Close a ceshim-file.
 */
@@ -234,14 +475,39 @@ static int ceshimRead(
 
   if( p->pPager ){
     DbPage *pPage;
-    Pgno pgno = iOfst==0 ? 1 : (Pgno)(iOfst/p->pageSize+1);
-
-    if( (rc = sqlite3PagerGet(p->pPager, pgno, &pPage, 0)) == SQLITE_OK ){
-      void *data = sqlite3PagerGetData(pPage);
-      u32 rem = iOfst==0 ? 0 : (u32)(iOfst%p->pageSize);
-      memcpy(zBuf, data+rem, iAmt);
+    Pgno srcPgno, mappedPgno;
+    if( (rc = ceshimGetPageNos(p, iOfst, &srcPgno, &mappedPgno)) == SQLITE_ERROR ){
+      if( iOfst < p->pageSize ) {
+        mappedPgno = 1;
+        rc = SQLITE_OK;
+      }
     }
-    sqlite3PagerUnref(pPage);
+    if( rc==SQLITE_OK &&  (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0)) == SQLITE_OK ){
+      CeshimCompressedOffset cmprPgOfst;
+      CeshimCompressedSize uPgSz;
+      CeshimMemPage *pMemPage = memPageFromDbPage(pPage, srcPgno, mappedPgno);
+      cmprPgOfst = ceshimGetPageOffset(p, pMemPage, iOfst, &uPgSz);
+      if( uPgSz > 0 ){
+        int iDstAmt = p->pageSize;
+        void *pBuf = sqlite3_malloc(p->pageSize);
+        pInfo->xUncompress(
+          NULL,
+          pBuf,
+          &iDstAmt,
+          (char *)pMemPage->aData
+            +pMemPage->dbHdrOffset
+            +pMemPage->pgHdrOffset
+            +cmprPgOfst,
+          uPgSz
+        );
+        memcpy(zBuf, pBuf+iOfst, iAmt);
+        sqlite3_free(pBuf);
+      }else{
+        memset(zBuf, 0, iAmt);
+      }
+      sqlite3PagerUnref(pPage);
+    }
+    else return SQLITE_OK;
   }else{
     rc = p->pReal->pMethods->xRead(p->pReal, zBuf, iAmt, iOfst);
   }
@@ -261,16 +527,48 @@ static int ceshimWrite(
   ceshim_file *p = (ceshim_file *)pFile;
   ceshim_info *pInfo = p->pInfo;
   int rc;
-  ceshim_printf(pInfo, "%s.xWrite(%s, offset=%06lld, amt=%06d,)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
 
   if( p->pPager ){
     DbPage *pPage;
-    Pgno pgno = iOfst==0 ? 1 : (Pgno)(iOfst/p->pageSize+1);
-    if( (rc = sqlite3PagerGet(p->pPager, pgno, &pPage, 0)) == SQLITE_OK ){
-      void *data = sqlite3PagerGetData(pPage);
-      if( (rc = sqlite3PagerWrite(pPage)) == SQLITE_OK ){
-        u32 rem = iOfst==0 ? 0 : (u32)(iOfst%p->pageSize);
-        memcpy(data+rem, zBuf, iAmt);
+    Pgno srcPgno, mappedPgno;
+
+    // compress
+    int pnDest = pInfo->xCompressBound(NULL, iAmt);
+    void* pBuf = sqlite3_malloc(pnDest);
+    pInfo->xCompress(NULL, pBuf, &pnDest, (void *)zBuf, iAmt);
+
+    if( ceshimGetPageNos(p, iOfst, &srcPgno, &mappedPgno) == SQLITE_ERROR ){
+      mappedPgno = ceshimGetUnmappedDstPgno(p, iOfst, pnDest);
+    }
+
+    ceshim_printf(pInfo, "%s.xWrite(%s, Pgno=%u->%u, offset=%06lld, amt=%06d,)", pInfo->zVfsName, p->zFName, srcPgno, mappedPgno, iOfst, iAmt);
+
+    if( (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0)) == SQLITE_OK ){
+      // write
+      CeshimMemPage *pMemPage = memPageFromDbPage(pPage, srcPgno, mappedPgno);
+      if( (rc = ceshimSetPageOffset(pMemPage, p, iOfst, pnDest)) == SQLITE_OK ){
+        CeshimCompressedOffset cmprPgOfst = ceshimGetPageOffset(p, pMemPage, iOfst, NULL);
+        if( (rc = sqlite3PagerWrite(pPage)) == SQLITE_OK ){
+          ceshim_printf(
+            pInfo,
+            "\n[compressed] %s.xWrite(%s, offset=%06lld, amt=%06d,)",
+            pInfo->zVfsName,
+            p->zFName,
+            pMemPage->dbHdrOffset+pMemPage->pgHdrOffset+cmprPgOfst,
+            pnDest
+          );
+          memcpy(
+            pMemPage->aData
+              +pMemPage->dbHdrOffset
+              +pMemPage->pgHdrOffset
+              +cmprPgOfst,
+            pBuf,
+            pnDest
+          );
+
+          // Keep track of size of uncompressed pager
+          if( pInfo->lgstPgno<srcPgno ) pInfo->lgstPgno = srcPgno;
+        }
       }
       sqlite3PagerUnref(pPage);
 
@@ -279,6 +577,7 @@ static int ceshimWrite(
       sqlite3PagerFlush(p->pPager);
     }
   }else{
+    ceshim_printf(pInfo, "%s.xWrite(%s, offset=%06lld, amt=%06d,)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
     rc = p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
   }
   ceshim_print_errcode(pInfo, " -> %s\n", rc);
@@ -322,14 +621,20 @@ static int ceshimSync(sqlite3_file *pFile, int flags){
 }
 
 /*
-** Return the current file-size of a ceshim-file.
+** Return ficticious uncompressed file size based on number of pages from source pager
+** otherwise internal checks in pager.c will fail.
 */
 static int ceshimFileSize(sqlite3_file *pFile, sqlite_int64 *pSize){
   ceshim_file *p = (ceshim_file *)pFile;
   ceshim_info *pInfo = p->pInfo;
   int rc;
   ceshim_printf(pInfo, "%s.xFileSize(%s)", pInfo->zVfsName, p->zFName);
-  rc = p->pReal->pMethods->xFileSize(p->pReal, pSize);
+  if(p->pPager ){
+    *pSize = pInfo->lgstPgno * p->pageSize;
+    rc = SQLITE_OK;
+  }else{
+    rc = p->pReal->pMethods->xFileSize(p->pReal, pSize);
+  }
   ceshim_print_errcode(pInfo, " -> %s,", rc);
   ceshim_printf(pInfo, " size=%lld\n", *pSize);
   return rc;
@@ -543,7 +848,10 @@ static int ceshimOpen(
     int flags,
     int *pOutFlags
 ){
+  unsigned char zDbHeader[100];
+  u8 nReserve;
   int rc;
+
   ceshim_file *p = (ceshim_file *)pFile;
   ceshim_info *pInfo = (ceshim_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
@@ -585,19 +893,41 @@ static int ceshimOpen(
       pFile->pMethods = pNew;
     }
 
-    // create pager to handle I/O to compresses/encrypted underlying db
+    // create pager to handle I/O to compressed/encrypted underlying db
     if( flags & (SQLITE_OPEN_MAIN_DB | SQLITE_OPEN_TEMP_DB | SQLITE_OPEN_TRANSIENT_DB) ){
       rc = sqlite3PagerOpen(pInfo->pRootVfs, &p->pPager, zName, EXTRA_SIZE, PAGER_OMIT_JOURNAL, flags, pageReinit);
       if( rc==SQLITE_OK ){
         //rc = sqlite3PagerLockingMode(p->pPager, PAGER_LOCKINGMODE_NORMAL);
-        //sqlite3PagerSetMmapLimit(pBt->pPager, db->szMmap);
-        if( (rc = sqlite3PagerReadFileheader(p->pPager,sizeof(p->zDbHeader),p->zDbHeader)) == SQLITE_OK ){
-          p->pageSize = (p->zDbHeader[16]<<8) | (p->zDbHeader[17]<<16);
-          if( (rc = sqlite3PagerSetPagesize(p->pPager, &p->pageSize, 0)) == SQLITE_OK ){
+        //sqlite3PagerSetMmapLimit(pBt->pPager, db->szMmap); /* advisory, except if 0 */
+
+        if( (rc = sqlite3PagerReadFileheader(p->pPager,sizeof(zDbHeader),zDbHeader)) == SQLITE_OK ){
+          p->pageSize = (zDbHeader[16]<<8) | (zDbHeader[17]<<16);
+          if( p->pageSize<512 || p->pageSize>SQLITE_MAX_PAGE_SIZE
+             || ((p->pageSize-1)&p->pageSize)!=0 ){
+            p->pageSize = 0; // sqlite3PagerSetPagesize will set page size
+            nReserve = 0;
+          }else{
+            nReserve = zDbHeader[20];
+          }
+          if( (rc = sqlite3PagerSetPagesize(p->pPager, &p->pageSize, nReserve)) == SQLITE_OK ){
+            p->usableSize = p->pageSize - nReserve;
             sqlite3PagerSetCachesize(p->pPager, SQLITE_DEFAULT_CACHE_SIZE);
             //rc = sqlite3PagerSetJournalMode(p->pPager, PAGER_JOURNALMODE_MEMORY);
             //sqlite3PagerJournalSizeLimit(p->pPager, -1);
-            rc = sqlite3PagerSharedLock(p->pPager);
+            if( (rc = sqlite3PagerSharedLock(p->pPager)) == SQLITE_OK ){
+              DbPage *pDbPage1;
+              if( (rc = sqlite3PagerGet(p->pPager, 1, &pDbPage1, 0)) == SQLITE_OK ){
+                pInfo->pPage1 = memPageFromDbPage(pDbPage1, 1, 1);
+                int nPageFile = 0;
+                sqlite3PagerPagecount(p->pPager, &nPageFile);
+                if( nPageFile == 0 ){
+                  rc = ceshimNewDatabase(p);
+                }else{
+                  rc = ceshimReadUncompressed(p->pPager, 1, sizeof(pInfo->pagemap), (void *)&pInfo->pagemap, 100);
+                }
+                sqlite3PagerUnref(pDbPage1);
+              }
+            }
           }
         }
       }else{
@@ -860,6 +1190,8 @@ int ceshim_register(
   pInfo->xCompressBound = xCompressBound;
   pInfo->xCompress = xCompress;
   pInfo->xUncompress = xUncompress;
+  pInfo->pagemap.currPgno = 1;
+
   ceshim_printf(pInfo, "%s.enabled_for(\"%s\")\n", pInfo->zVfsName, pRoot->zName);
   return sqlite3_vfs_register(pNew, makeDefault);
 }
