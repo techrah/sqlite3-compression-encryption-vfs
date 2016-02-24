@@ -281,7 +281,7 @@ static int ceshimPagerGet(
 );
 
 static int ceshimPagerWrite(ceshim_file *p, PgHdr *pPg){
-int rc;
+int rc = SQLITE_OK;
   if( p->nTransactions == 0 ){
     if( (rc = sqlite3PagerBegin(p->pPager, 0, 1))==SQLITE_OK ){
       p->nTransactions++;
@@ -769,6 +769,7 @@ static int ceshimCheckReservedLock(sqlite3_file *pFile, int *pResOut){
   ceshim_file *p = (ceshim_file *)pFile;
   ceshim_info *pInfo = p->pInfo;
   int rc = SQLITE_OK;
+  *pResOut = 0; // not locked
   ceshim_printf(pInfo, "%s.xCheckReservedLock(%s,%d) BYPASS", pInfo->zVfsName, p->zFName);
   ceshim_print_errcode(pInfo, " -> %s", rc);
   ceshim_printf(pInfo, ", out=%d\n", *pResOut);
