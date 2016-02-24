@@ -273,13 +273,6 @@ static int ceshimReadUncompressed(
   return rc;
 }
 
-static int ceshimPagerGet(
-  ceshim_file *pFile,
-  Pgno pgno,          /* Page number to fetch */
-  DbPage **ppPage,    /* Write a pointer to the page here */
-  int flags           /* PAGER_GET_XXX flags */
-);
-
 static int ceshimPagerWrite(ceshim_file *p, PgHdr *pPg){
 int rc = SQLITE_OK;
   if( p->nTransactions == 0 ){
@@ -299,8 +292,8 @@ static int ceshimWriteUncompressed(
   int iAmt
 ){
   int rc;
-  DbPage *pPage;
-  if( (rc = ceshimPagerGet(pFile, pgno, &pPage, 0)) == SQLITE_OK ){
+  DbPage *pPage = NULL;
+  if( (rc = sqlite3PagerGet(pFile->pPager, pgno, &pPage, 0)) == SQLITE_OK ){
     void *data = sqlite3PagerGetData(pPage);
     if( (rc = ceshimPagerWrite(pFile, pPage)) == SQLITE_OK ){
       memcpy(data+offset, zBuf, iAmt);
@@ -520,22 +513,6 @@ static int ceshimClose(sqlite3_file *pFile){
   return rc;
 }
 
-static int ceshimPagerGet(
-  ceshim_file *pFile,
-  Pgno pgno,          /* Page number to fetch */
-  DbPage **ppPage,    /* Write a pointer to the page here */
-  int flags           /* PAGER_GET_XXX flags */
-){
-  int rc=SQLITE_OK;
-  ceshim_info *pInfo = pFile->pInfo;
-  /*if( pgno==1 && pInfo->pPage1 ){
-    *ppPage = pInfo->pPage1->pDbPage;
-  }else*/{
-    rc=sqlite3PagerGet(pFile->pPager, pgno, ppPage, flags);
-  }
-  return rc;
-}
-
 /*
 ** Read data from a ceshim-file.
 */
@@ -559,7 +536,7 @@ static int ceshimRead(
         rc = SQLITE_OK;
       }
     }
-    if( rc==SQLITE_OK &&  (rc = ceshimPagerGet(p, mappedPgno, &pPage, 0)) == SQLITE_OK ){
+    if( rc==SQLITE_OK &&  (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0)) == SQLITE_OK ){
       CeshimCompressedOffset cmprPgOfst;
       CeshimCompressedSize uPgSz;
       CeshimMemPage *pMemPage = memPageFromDbPage(pPage, mappedPgno);
@@ -622,7 +599,7 @@ static int ceshimWrite(
 
       ceshim_printf(pInfo, "%s.xWrite(%s, Pgno=%u->%u, offset=%06lld, amt=%06d,)", pInfo->zVfsName, p->zFName, uppPgno, mappedPgno, iOfst, iAmt);
 
-      if( (rc = ceshimPagerGet(p, mappedPgno, &pPage, 0)) == SQLITE_OK ){
+      if( (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0)) == SQLITE_OK ){
         // write
         CeshimMemPage *pMemPage = memPageFromDbPage(pPage, mappedPgno);
         if( (rc = ceshimSetPageOffset(pMemPage, p, iOfst, pnDest)) == SQLITE_OK ){
