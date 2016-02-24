@@ -161,6 +161,25 @@ static const char *fileTail(const char *z){
 }
 
 /*
+** Map the upper pager's journal file onto a different name.
+** findCreateFileMode() in os_unix.c requires journal file to be in same directory
+** or not have '-' in name. We'll just append "-btree" to distinguish it from ours.
+*/
+const char *ceshimMapPath(ceshim_info *pInfo, const char *zName){
+  static const char *zTail = "-btree";
+  if( strstr(zName, "-journal")==0 ) return zName;
+  char *zUppJournalPath = pInfo->zUppJournalPath;
+  if( zUppJournalPath == NULL ){
+    zUppJournalPath = sqlite3_malloc((int)(strlen(zName)+strlen(zTail))+1); // TODO: Free
+    *zUppJournalPath = '\0';
+    strcat(zUppJournalPath, zName);
+    strcat(zUppJournalPath, zTail);
+    pInfo->zUppJournalPath = zUppJournalPath;
+  }
+  return zUppJournalPath;
+}
+
+/*
 ** Send trace output defined by zFormat and subsequent arguments.
 */
 static void ceshim_printf(
@@ -597,7 +616,7 @@ static int ceshimWrite(
         mappedPgno = ceshimGetUnmappedDstPgno(p, iOfst, pnDest);
       }
 
-      ceshim_printf(pInfo, "%s.xWrite(%s, Pgno=%u->%u, offset=%06lld, amt=%06d,)", pInfo->zVfsName, p->zFName, uppPgno, mappedPgno, iOfst, iAmt);
+      ceshim_printf(pInfo, "%s.xWrite(%s, Pgno=%u->%u, offset=%06lld, amt=%06d)", pInfo->zVfsName, p->zFName, uppPgno, mappedPgno, iOfst, iAmt);
 
       if( (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0)) == SQLITE_OK ){
         // write
@@ -607,7 +626,7 @@ static int ceshimWrite(
           if( (rc = ceshimPagerWrite(p, pPage)) == SQLITE_OK ){
             ceshim_printf(
               pInfo,
-              "\n[compressed] %s.xWrite(%s, offset=%06lld, amt=%06d,)",
+              "\n[compressed] %s.xWrite(%s, offset=%06lld, amt=%06d)",
               pInfo->zVfsName,
               p->zFName,
               pMemPage->dbHdrOffset+pMemPage->pgHdrOffset+cmprPgOfst,
@@ -628,14 +647,10 @@ static int ceshimWrite(
           }
         }
         sqlite3PagerUnref(pPage);
-
-        // Need this for table to be available after CREATE TABLE.
-        // Is ther a better way to do this ... or more efficient time to flush?
-        //sqlite3PagerFlush(p->pPager);
       }
     }
   }else{
-    ceshim_printf(pInfo, "%s.xWrite(%s, offset=%06lld, amt=%06d,)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
+    ceshim_printf(pInfo, "%s.xWrite(%s, offset=%06lld, amt=%06d)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
     rc = p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
   }
   ceshim_print_errcode(pInfo, " -> %s\n", rc);
@@ -903,7 +918,7 @@ static void pageReinit(DbPage *pData) {
 */
 static int ceshimOpen(
     sqlite3_vfs *pVfs,
-    const char *zName,
+    const char *_zName,
     sqlite3_file *pFile,
     int flags,
     int *pOutFlags
@@ -915,6 +930,7 @@ static int ceshimOpen(
   ceshim_file *p = (ceshim_file *)pFile;
   ceshim_info *pInfo = (ceshim_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
+  const char *zName = ceshimMapPath(pInfo, _zName);
 
   p->pInfo = pInfo;
   p->zFName = zName ? fileTail(zName) : "<temp>";
@@ -955,12 +971,12 @@ static int ceshimOpen(
 
     // create pager to handle I/O to compressed/encrypted underlying db
     if( flags & (SQLITE_OPEN_MAIN_DB | SQLITE_OPEN_TEMP_DB | SQLITE_OPEN_TRANSIENT_DB) ){
-      rc = sqlite3PagerOpen(pInfo->pRootVfs, &p->pPager, zName, EXTRA_SIZE, 0, flags, pageReinit);
-//      rc = sqlite3PagerSetJournalMode(p->pPager, PAGER_JOURNALMODE_MEMORY);
+      if( (rc = sqlite3PagerOpen(pInfo->pRootVfs, &p->pPager, zName, EXTRA_SIZE, 0, flags, pageReinit))==SQLITE_OK){
         if( rc==SQLITE_OK ){
-          //rc = sqlite3PagerLockingMode(p->pPager, PAGER_LOCKINGMODE_NORMAL);
-          //sqlite3PagerSetMmapLimit(pBt->pPager, db->szMmap); /* advisory, except if 0 */
-
+          sqlite3PagerSetJournalMode(p->pPager, PAGER_JOURNALMODE_DELETE);
+//          sqlite3PagerJournalSizeLimit(p->pPager, -1);
+//          rc = sqlite3PagerLockingMode(p->pPager, PAGER_LOCKINGMODE_NORMAL);
+//          sqlite3PagerSetMmapLimit(pBt->pPager, db->szMmap); /* advisory, except if 0 */
           if( (rc = sqlite3PagerReadFileheader(p->pPager,sizeof(zDbHeader),zDbHeader)) == SQLITE_OK ){
             p->pageSize = (zDbHeader[16]<<8) | (zDbHeader[17]<<16);
             if( p->pageSize<512 || p->pageSize>SQLITE_MAX_PAGE_SIZE
@@ -973,8 +989,6 @@ static int ceshimOpen(
             if( (rc = sqlite3PagerSetPagesize(p->pPager, &p->pageSize, nReserve)) == SQLITE_OK ){
               p->usableSize = p->pageSize - nReserve;
               sqlite3PagerSetCachesize(p->pPager, SQLITE_DEFAULT_CACHE_SIZE);
-              //rc = sqlite3PagerSetJournalMode(p->pPager, PAGER_JOURNALMODE_MEMORY);
-              //sqlite3PagerJournalSizeLimit(p->pPager, -1);
               if( (rc = sqlite3PagerSharedLock(p->pPager)) == SQLITE_OK ){
                 DbPage *pDbPage1;
                 if( (rc = sqlite3PagerGet(p->pPager, 1, &pDbPage1, 0)) == SQLITE_OK ){
@@ -1001,6 +1015,7 @@ static int ceshimOpen(
         }
       }
     }
+  }
 
   ceshim_print_errcode(pInfo, " -> %s", rc);
   if( pOutFlags ){
@@ -1016,29 +1031,32 @@ static int ceshimOpen(
 ** ensure the file-system modifications are synced to disk before
 ** returning.
 */
-static int ceshimDelete(sqlite3_vfs *pVfs, const char *zPath, int dirSync){
+static int ceshimDelete(sqlite3_vfs *pVfs, const char *_zPath, int dirSync){
   ceshim_info *pInfo = (ceshim_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
   int rc;
-  ceshim_printf(pInfo, "%s.xDelete(\"%s\",%d)", pInfo->zVfsName, zPath, dirSync);
+  const char *zPath = ceshimMapPath(pInfo, _zPath);
+  ceshim_printf(pInfo, "%s.xDelete(\"%s\",%d) BYPASS", pInfo->zVfsName, zPath, dirSync);
   rc = pRoot->xDelete(pRoot, zPath, dirSync);
   ceshim_print_errcode(pInfo, " -> %s\n", rc);
   return rc;
 }
 
 /*
-** Test for access permissions. Return true if the requested permission
+** Test for access permissions.
+** Return true via *pResOut if the requested permission
 ** is available, or false otherwise.
 */
 static int ceshimAccess(
   sqlite3_vfs *pVfs,
-  const char *zPath,
+  const char *_zPath,
   int flags,
   int *pResOut
 ){
   ceshim_info *pInfo = (ceshim_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
-  int rc;
+  const char *zPath = ceshimMapPath(pInfo, _zPath);
+  int rc = SQLITE_OK;
   ceshim_printf(pInfo, "%s.xAccess(\"%s\",%d)", pInfo->zVfsName, zPath, flags);
   rc = pRoot->xAccess(pRoot, zPath, flags, pResOut);
   ceshim_print_errcode(pInfo, " -> %s", rc);
@@ -1159,24 +1177,27 @@ static int ceshimGetLastError(sqlite3_vfs *pVfs, int iErr, char *zErr){
 */
 static int ceshimSetSystemCall(
   sqlite3_vfs *pVfs,
-  const char *zName,
+  const char *_zName,
   sqlite3_syscall_ptr pFunc
 ){
   ceshim_info *pInfo = (ceshim_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
+  const char *zName = ceshimMapPath(pInfo, _zName);
   return pRoot->xSetSystemCall(pRoot, zName, pFunc);
 }
 static sqlite3_syscall_ptr ceshimGetSystemCall(
   sqlite3_vfs *pVfs,
-  const char *zName
+  const char *_zName
 ){
   ceshim_info *pInfo = (ceshim_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
+  const char *zName = ceshimMapPath(pInfo, _zName);
   return pRoot->xGetSystemCall(pRoot, zName);
 }
-static const char *ceshimNextSystemCall(sqlite3_vfs *pVfs, const char *zName){
+static const char *ceshimNextSystemCall(sqlite3_vfs *pVfs, const char *_zName){
   ceshim_info *pInfo = (ceshim_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
+  const char *zName = ceshimMapPath(pInfo, _zName);
   return pRoot->xNextSystemCall(pRoot, zName);
 }
 
