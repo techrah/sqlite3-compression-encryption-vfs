@@ -488,7 +488,7 @@ static int ceshimClose(sqlite3_file *pFile){
   int rc = SQLITE_OK;
   ceshim_printf(pInfo, "%s.xClose(%s)", pInfo->zVfsName, p->zFName);
 
-  if( p->pPager && p->nTransactions ){
+  if( p->pPager ){
     // save pager counts
     u8 buf[4];
     sqlite3Put4byte(buf, pInfo->pagemap.lwrPageFile);
@@ -500,16 +500,17 @@ static int ceshimClose(sqlite3_file *pFile){
           sqlite3PagerCommitPhaseTwo(p->pPager);
         }
       }
+      p->nTransactions = 0;
+
+      if( rc==SQLITE_OK ){
+        sqlite3PagerUnref(pInfo->pPage1->pDbPage);
+        if( (rc = sqlite3PagerClose(p->pPager))==SQLITE_OK ){
+          p->pPager = NULL;
+        }
+      }
     }
   }
-
-  if( rc==SQLITE_OK ){
-    sqlite3PagerUnref(pInfo->pPage1->pDbPage);
-    if( (rc = sqlite3PagerClose(p->pPager))==SQLITE_OK ){
-      p->pPager = NULL;
-    }
-  }
-
+  
   if( (rc == SQLITE_OK) && ((rc = p->pReal->pMethods->xClose(p->pReal)) == SQLITE_OK) ){
     sqlite3_free((void*)p->base.pMethods);
     p->base.pMethods = NULL;
@@ -978,50 +979,50 @@ static int ceshimOpen(
     if( flags & (SQLITE_OPEN_MAIN_DB | SQLITE_OPEN_TEMP_DB | SQLITE_OPEN_TRANSIENT_DB) ){
       rc = sqlite3PagerOpen(pInfo->pRootVfs, &p->pPager, zName, EXTRA_SIZE, 0, flags, pageReinit);
 //      rc = sqlite3PagerSetJournalMode(p->pPager, PAGER_JOURNALMODE_MEMORY);
-      if( rc==SQLITE_OK ){
-        //rc = sqlite3PagerLockingMode(p->pPager, PAGER_LOCKINGMODE_NORMAL);
-        //sqlite3PagerSetMmapLimit(pBt->pPager, db->szMmap); /* advisory, except if 0 */
+        if( rc==SQLITE_OK ){
+          //rc = sqlite3PagerLockingMode(p->pPager, PAGER_LOCKINGMODE_NORMAL);
+          //sqlite3PagerSetMmapLimit(pBt->pPager, db->szMmap); /* advisory, except if 0 */
 
-        if( (rc = sqlite3PagerReadFileheader(p->pPager,sizeof(zDbHeader),zDbHeader)) == SQLITE_OK ){
-          p->pageSize = (zDbHeader[16]<<8) | (zDbHeader[17]<<16);
-          if( p->pageSize<512 || p->pageSize>SQLITE_MAX_PAGE_SIZE
-             || ((p->pageSize-1)&p->pageSize)!=0 ){
-            p->pageSize = 0; // sqlite3PagerSetPagesize will set page size
-            nReserve = 0;
-          }else{
-            nReserve = zDbHeader[20];
-          }
-          if( (rc = sqlite3PagerSetPagesize(p->pPager, &p->pageSize, nReserve)) == SQLITE_OK ){
-            p->usableSize = p->pageSize - nReserve;
-            sqlite3PagerSetCachesize(p->pPager, SQLITE_DEFAULT_CACHE_SIZE);
-            //rc = sqlite3PagerSetJournalMode(p->pPager, PAGER_JOURNALMODE_MEMORY);
-            //sqlite3PagerJournalSizeLimit(p->pPager, -1);
-            if( (rc = sqlite3PagerSharedLock(p->pPager)) == SQLITE_OK ){
-              DbPage *pDbPage1;
-              if( (rc = sqlite3PagerGet(p->pPager, 1, &pDbPage1, 0)) == SQLITE_OK ){
-                pInfo->pPage1 = memPageFromDbPage(pDbPage1, 1);
-                int nPageFile = 0;
-                sqlite3PagerPagecount(p->pPager, &nPageFile);
-                if( nPageFile == 0 ){
-                  if(( rc = ceshimNewDatabase(p))==SQLITE_OK ){
+          if( (rc = sqlite3PagerReadFileheader(p->pPager,sizeof(zDbHeader),zDbHeader)) == SQLITE_OK ){
+            p->pageSize = (zDbHeader[16]<<8) | (zDbHeader[17]<<16);
+            if( p->pageSize<512 || p->pageSize>SQLITE_MAX_PAGE_SIZE
+               || ((p->pageSize-1)&p->pageSize)!=0 ){
+              p->pageSize = 0; // sqlite3PagerSetPagesize will set page size
+              nReserve = 0;
+            }else{
+              nReserve = zDbHeader[20];
+            }
+            if( (rc = sqlite3PagerSetPagesize(p->pPager, &p->pageSize, nReserve)) == SQLITE_OK ){
+              p->usableSize = p->pageSize - nReserve;
+              sqlite3PagerSetCachesize(p->pPager, SQLITE_DEFAULT_CACHE_SIZE);
+              //rc = sqlite3PagerSetJournalMode(p->pPager, PAGER_JOURNALMODE_MEMORY);
+              //sqlite3PagerJournalSizeLimit(p->pPager, -1);
+              if( (rc = sqlite3PagerSharedLock(p->pPager)) == SQLITE_OK ){
+                DbPage *pDbPage1;
+                if( (rc = sqlite3PagerGet(p->pPager, 1, &pDbPage1, 0)) == SQLITE_OK ){
+                  pInfo->pPage1 = memPageFromDbPage(pDbPage1, 1);
+                  int nPageFile = 0;
+                  sqlite3PagerPagecount(p->pPager, &nPageFile);
+                  if( nPageFile == 0 ){
+                    if(( rc = ceshimNewDatabase(p))==SQLITE_OK ){
+                    }
+                  }else{
+                    // restore page map table
+                    memcpy(&pInfo->pagemap, pInfo->pPage1->aData+CESHIM_DB_HEADER_PGR_SZ, CESHIM_DB_HEADER_MAP_SZ);
                   }
-                }else{
-                  // restore page map table
-                  memcpy(&pInfo->pagemap, pInfo->pPage1->aData+CESHIM_DB_HEADER_PGR_SZ, CESHIM_DB_HEADER_MAP_SZ);
+                  /* reminder: do not call sqlite3PagerUnref(pDbPage1) here as this will
+                     cause pager state to reset to PAGER_OPEN which is not desirable for writing to pager. */
                 }
-                /* reminder: do not call sqlite3PagerUnref(pDbPage1) here as this will
-                   cause pager state to reset to PAGER_OPEN which is not desirable for writing to pager. */
               }
             }
           }
-        }
-      }else{
-        if( pInfo && p->pPager ){
-          sqlite3PagerClose(p->pPager);
+        }else{
+          if( pInfo && p->pPager ){
+            sqlite3PagerClose(p->pPager);
+          }
         }
       }
     }
-  }
 
   ceshim_print_errcode(pInfo, " -> %s", rc);
   if( pOutFlags ){
