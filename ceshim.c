@@ -13,37 +13,31 @@
 #define CESHIM_DB_HEADER_MAP_SZ     100
 #define CESHIM_DB_HEADER_SIZE       (CESHIM_DB_HEADER_PGR_SZ + CESHIM_DB_HEADER_MAP_SZ)
 
+#define CESHIM_MAX_PAGE_MAP_ENTRIES  20
+
 // Each page holds many compressed pages and has a page map header
 #define CESHIM_PAGE_HEADER_SIZE     100
-#define CESHIM_MAX_PAGE_MAP_ENTRIES  20
 #define CESHIM_MAX_OFFSET_ENTRIES    10
 
 typedef u16 CeshimCompressedSize;
 typedef u16 CeshimCompressedOffset;
 
 /*
- ** The header string that appears at the beginning of every
- ** SQLite database.
- */
+** The header string that appears at the beginning of every
+** SQLite database.
+*/
 static const char zMagicHeader[] = SQLITE_FILE_HEADER;
 
 /*
-** Keeps track of uncompress to compressed pager page mappings.
-** In memory during writing. Needs to be persisted when db is closed.
+** Keeps track of data we need to persist for the pager
+** including upper-to-lower pager page mapping.
 */
-typedef struct ceshim_pagemap_entry ceshim_pagemap_entry;
-struct __attribute__ ((__packed__)) ceshim_pagemap_entry {
-  Pgno uppPgno;
-  Pgno lwrPgno;
-};
 typedef struct ceshim_header ceshim_header;
 struct __attribute__ ((__packed__)) ceshim_header {
-  u8 nCount;                            // 01 number of pagemap entries in use
   Pgno currPgno;                        // 04 curr lower pager pgno being filled
   CeshimCompressedOffset currPageOfst;  // 02 curr offset for next compressed page
   Pgno uppPageFile;                     // 04 max pgno in upper pager, used to report filesize
-  Pgno lwrPageFile;                     // 04 max pgno in lower pager, used to update pager header
-  unsigned char reserved[5];            // 05 pad structure to 100 bytes
+  unsigned char reserved[10];           // 10 pad structure to 100 bytes
   Pgno pagemap[20];                     // 80 (4 bytes x 20) page mappings
 };
 
@@ -88,6 +82,7 @@ struct ceshim_info {
   sqlite3_vfs *pCeshimVfs;            /* Pointer back to the ceshim VFS */
   ceshim_header ceshimHeader;         /* Page mapping data */
   CeshimMemPage *pPage1;              /* Page 1 of the pager */
+  Pgno lwrPageFile;                   // 04 max pgno in lower pager, used to update pager header
 };
 
 /*
@@ -461,7 +456,6 @@ static int ceshimSetMappedPgno(ceshim_file *p, sqlite3_uint64 iOfst, Pgno lwrPgn
   header->currPageOfst += uSz;
   Pgno uppPgno = (Pgno)(iOfst/p->pageSize+1);
   if( header->pagemap[lwrPgno-1]<uppPgno ){
-    if( header->pagemap[lwrPgno-1]==0 ) header->nCount++;
     header->pagemap[lwrPgno-1] = uppPgno;
     return ceshimSavePagemap(p);
   }
@@ -477,7 +471,7 @@ static int ceshimGetPageNos(
   Pgno _uppPgno = (Pgno)(iOfst/p->pageSize+1);
   if (uppPgno) *uppPgno = _uppPgno;
   ceshim_header *header = &p->pInfo->ceshimHeader;
-  for(int i=0; i<header->nCount; i++){
+  for(int i=0; i<CESHIM_MAX_PAGE_MAP_ENTRIES && header->pagemap[i]; i++){
     if( _uppPgno<=header->pagemap[i] ){
       if( mappedPgno ) *mappedPgno = i+1;
       return SQLITE_OK;
@@ -510,7 +504,7 @@ static int ceshimClose(sqlite3_file *pFile){
   if( p->pPager ){
     // save pager counts
     u8 buf[4];
-    sqlite3Put4byte(buf, pInfo->ceshimHeader.lwrPageFile);
+    sqlite3Put4byte(buf, pInfo->lwrPageFile);
     rc = ceshimWriteUncompressed(p, 1, 28, buf, 4);
 
     if( (rc = ceshimSavePagemap(p))==SQLITE_OK ){
@@ -650,7 +644,7 @@ static int ceshimWrite(
 
             // Keep track of sizes of upper and lower pagers
             if( pInfo->ceshimHeader.uppPageFile<uppPgno ) pInfo->ceshimHeader.uppPageFile = uppPgno;
-            if( pInfo->ceshimHeader.lwrPageFile<mappedPgno ) pInfo->ceshimHeader.lwrPageFile = mappedPgno;
+            if( pInfo->lwrPageFile<mappedPgno ) pInfo->lwrPageFile = mappedPgno;
           }
         }
         sqlite3PagerUnref(pPage);
@@ -992,6 +986,7 @@ static int ceshimOpen(
               nReserve = 0;
             }else{
               nReserve = zDbHeader[20];
+              pInfo->lwrPageFile = sqlite3Get4byte(zDbHeader+28);
             }
             if( (rc = sqlite3PagerSetPagesize(p->pPager, &p->pageSize, nReserve)) == SQLITE_OK ){
               p->usableSize = p->pageSize - nReserve;
@@ -1003,8 +998,7 @@ static int ceshimOpen(
                   int nPageFile = 0;
                   sqlite3PagerPagecount(p->pPager, &nPageFile);
                   if( nPageFile == 0 ){
-                    if(( rc = ceshimNewDatabase(p))==SQLITE_OK ){
-                    }
+                    rc = ceshimNewDatabase(p);
                   }else{
                     // restore page map table
                     memcpy(&pInfo->ceshimHeader, pInfo->pPage1->aData+CESHIM_DB_HEADER_PGR_SZ, CESHIM_DB_HEADER_MAP_SZ);
