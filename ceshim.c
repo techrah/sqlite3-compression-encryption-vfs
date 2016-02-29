@@ -177,7 +177,7 @@ const char *ceshimMapPath(ceshim_info *pInfo, const char *zName){
   if( strstr(zName, "-journal")==0 ) return zName;
   char *zUppJournalPath = pInfo->zUppJournalPath;
   if( zUppJournalPath == NULL ){
-    zUppJournalPath = sqlite3_malloc((int)(strlen(zName)+strlen(zTail))+1); // TODO: Free
+    zUppJournalPath = sqlite3_malloc((int)(strlen(zName)+strlen(zTail))+1);
     *zUppJournalPath = '\0';
     strcat(zUppJournalPath, zName);
     strcat(zUppJournalPath, zTail);
@@ -579,6 +579,10 @@ static int ceshimClose(sqlite3_file *pFile){
         ceshimReleasePage1(p);
         if( (rc = sqlite3PagerClose(p->pPager))==SQLITE_OK ){
           p->pPager = NULL;
+          if( pInfo->zUppJournalPath ){
+            sqlite3_free(pInfo->zUppJournalPath);
+            pInfo->zUppJournalPath = NULL;
+          }
         }
       }
     }
