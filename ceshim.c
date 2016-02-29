@@ -69,9 +69,9 @@ typedef struct ceshim_info ceshim_info;
 struct ceshim_info {
   sqlite3_vfs *pRootVfs;              /* The underlying real VFS */
 
-  int (*xCompressBound)(void *, int nSrc);
-  int (*xCompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc);
-  int (*xUncompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc);
+  int (*xCompressBound)(void *pCtx, int nSrc);
+  int (*xCompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc);
+  int (*xUncompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc);
 
   // Trace Output
   int (*xOut)(const char*, void*);    /* Send output here */
@@ -583,7 +583,7 @@ static int ceshimClose(sqlite3_file *pFile){
       }
     }
   }
-  
+
   if( (rc == SQLITE_OK) && ((rc = p->pReal->pMethods->xClose(p->pReal)) == SQLITE_OK) ){
     sqlite3_free((void*)p->base.pMethods);
     p->base.pMethods = NULL;
@@ -1024,7 +1024,7 @@ static int ceshimOpen(
   p->zFName = zName ? fileTail(zName) : "<temp>";
   p->pReal = (sqlite3_file *)&p[1];
   p->pPager = NULL;
-  
+
   // Process URI parameters
   if( flags & SQLITE_OPEN_URI){
     const char *zParamBlockSize = sqlite3_uri_parameter(_zName, "block_size");
@@ -1296,15 +1296,14 @@ int ceshim_register(
   int (*xCompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc),
   int (*xUncompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc),
   int (*xOut)(const char*,void*),   /* Output routine. */
-  void *pOutArg,                    /* 2nd argument to xOut.  ex: stderr */
-  int makeDefault                   /* True to make the new VFS the default */
+  void *pOutArg                     /* 2nd argument to xOut.  ex: stderr */
 ){
   sqlite3_vfs *pNew;
   sqlite3_vfs *pRoot;
   ceshim_info *pInfo;
   int nName;
   int nByte;
-  
+
   // Allow parameters to be passed with database filename in URI form.
   sqlite3_config(SQLITE_CONFIG_URI, 1);
 
@@ -1358,7 +1357,17 @@ int ceshim_register(
   pInfo->xUncompress = xUncompress;
   pInfo->ceshimHeader.currPgno = 1;
   pInfo->uppPageSize = SQLITE_DEFAULT_PAGE_SIZE; // TODO: Can we get this value from upper pager?
-  
+
   ceshim_printf(pInfo, "%s.enabled_for(\"%s\")\n", pInfo->zVfsName, pRoot->zName);
-  return sqlite3_vfs_register(pNew, makeDefault);
+  return sqlite3_vfs_register(pNew, 0);
+}
+
+int ceshim_unregister(const char *zName){
+  sqlite3_vfs *pVfs = sqlite3_vfs_find(zName);
+  if( pVfs ){
+    //ceshim_info *pInfo = (ceshim_info *)pVfs->pAppData;
+    sqlite3_free(pVfs);
+    return SQLITE_OK;
+  }
+  return SQLITE_NOTFOUND;
 }
