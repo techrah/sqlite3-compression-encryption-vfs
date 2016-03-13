@@ -9,6 +9,9 @@
 #ifndef ceshim_h
 #define ceshim_h
 
+#define CESHIM_ERROR                       400
+#define CESHIM_ERROR_PAGE_SIZE_TOO_SMALL   (CESHIM_ERROR | (1<<8))
+
 int ceshim_register(
   const char *zName,                /* Name of the newly constructed VFS */
   const char *zParent,              /* Name of the underlying VFS. NULL to use default. */
