@@ -119,6 +119,7 @@ struct ceshim_info {
 
   // bools
   u8 bPgMapDirty:1;                   // Curr page map needs to be persisted
+  u8 bReadOnly:1;                     // True when db was open for read-only
 };
 
 /*
@@ -381,6 +382,7 @@ static int ceshimSavePagemapData(ceshim_file *p){
 static int ceshimSaveMMTbl(ceshim_file *p){
   int rc;
   ceshim_info *pInfo = p->pInfo;
+  assert( pInfo->bReadOnly==0 );
   ceshim_header *header = &pInfo->ceshimHeader;
   int memSz = header->mmTblMaxCnt*sizeof(CeshimMMTblEntry);
   CeshimMMTblEntry *buf = sqlite3_malloc(memSz);
@@ -520,7 +522,9 @@ static int ceshimWriteUncompressed(
 }
 
 static int ceshimSaveHeader(ceshim_file *p){
-  ceshim_header *header = &p->pInfo->ceshimHeader;
+  ceshim_info *pInfo = p->pInfo;
+  assert( pInfo->bReadOnly==0 );
+  ceshim_header *header = &pInfo->ceshimHeader;
   u8 buf[CESHIM_DB_HEADER2_SZ];
   memcpy(buf, &header->schema, 1);
   put4byte(buf+1, header->currPgno);
@@ -834,45 +838,45 @@ static int ceshimClose(sqlite3_file *pFile){
   ceshim_printf(pInfo, "%s.xClose(%s)", pInfo->zVfsName, p->zFName);
 
   if( p->pPager ){
-    // save pager counts
+    if( !pInfo->bReadOnly ){
+      int nPageFile = 0;   /* Number of pages in the database file */
+      sqlite3PagerPagecount(p->pPager, &nPageFile);
+      assert( pInfo->lwrPageFile==nPageFile );
 
-    int nPageFile = 0;   /* Number of pages in the database file */
-    sqlite3PagerPagecount(p->pPager, &nPageFile);
-    assert( pInfo->lwrPageFile==nPageFile );
+      u8 buf[4];
+      sqlite3Put4byte(buf, pInfo->lwrPageFile);
+      rc = ceshimWriteUncompressed(p, 1, 28, buf, 4);
+      rc = ceshimSaveHeader(p);
 
-    u8 buf[4];
-    sqlite3Put4byte(buf, pInfo->lwrPageFile);
-    rc = ceshimWriteUncompressed(p, 1, 28, buf, 4);
-    rc = ceshimSaveHeader(p);
-
-    if( (rc = ceshimSaveMMTbl(p))==SQLITE_OK ){
-      for(int i=0; i<p->nTransactions; i++){
-        if( (rc = sqlite3PagerCommitPhaseOne(p->pPager, NULL, 0))==SQLITE_OK ){
-          sqlite3PagerCommitPhaseTwo(p->pPager);
+      if( (rc = ceshimSaveMMTbl(p))==SQLITE_OK ){
+        for(int i=0; i<p->nTransactions; i++){
+          if( (rc = sqlite3PagerCommitPhaseOne(p->pPager, NULL, 0))==SQLITE_OK ){
+            sqlite3PagerCommitPhaseTwo(p->pPager);
+          }
         }
+        p->nTransactions = 0;
       }
-      p->nTransactions = 0;
-
-      if( rc==SQLITE_OK ){
-        ceshimReleasePage1(p);
-        if( (rc = sqlite3PagerClose(p->pPager))==SQLITE_OK ){
-          p->pPager = NULL;
-          if( pInfo->zUppJournalPath ){
-            sqlite3_free(pInfo->zUppJournalPath);
-            pInfo->zUppJournalPath = NULL;
-          }
-          if( pInfo->mmTbl ){
-            sqlite3_free(pInfo->mmTbl);
-            pInfo->mmTbl = NULL;
-          }
-          if( pInfo->pPgMap ){
-            sqlite3_free(pInfo->pPgMap);
-            pInfo->pPgMap = NULL;
-          }
-          if( pInfo->pBigEndianPgMap ){
-            sqlite3_free(pInfo->pBigEndianPgMap);
-            pInfo->pBigEndianPgMap = NULL;
-          }
+    }
+    
+    if( rc==SQLITE_OK ){
+      ceshimReleasePage1(p);
+      if( (rc = sqlite3PagerClose(p->pPager))==SQLITE_OK ){
+        p->pPager = NULL;
+        if( pInfo->zUppJournalPath ){
+          sqlite3_free(pInfo->zUppJournalPath);
+          pInfo->zUppJournalPath = NULL;
+        }
+        if( pInfo->mmTbl ){
+          sqlite3_free(pInfo->mmTbl);
+          pInfo->mmTbl = NULL;
+        }
+        if( pInfo->pPgMap ){
+          sqlite3_free(pInfo->pPgMap);
+          pInfo->pPgMap = NULL;
+        }
+        if( pInfo->pBigEndianPgMap ){
+          sqlite3_free(pInfo->pBigEndianPgMap);
+          pInfo->pBigEndianPgMap = NULL;
         }
       }
     }
@@ -1317,6 +1321,7 @@ static int ceshimOpen(
   }
 
   // open file
+  if( flags & SQLITE_OPEN_READONLY ) pInfo->bReadOnly = 1;
   rc = pRoot->xOpen(pRoot, zName, p->pReal, flags, pOutFlags);
   ceshim_printf(pInfo, "%s.xOpen(%s,flags=0x%x)",pInfo->zVfsName, p->zFName, flags);
 
