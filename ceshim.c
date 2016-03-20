@@ -805,7 +805,7 @@ static int ceshimPageMapSet(
 
       *outLwrPgno = pMapEntry->lwrPgno;
       *outCmpOfst = pMapEntry->cmprOfst;
-      ceshim_printf(pInfo, "Updated placeholder entry (uppOfst=%lld, lwrPgno=%lu,cmpOfst=%lu,cmpSz=%lu) \n",
+      ceshim_printf(pInfo, "Updated entry (uppOfst=%lld, lwrPgno=%lu,cmpOfst=%lu,cmpSz=%lu)\n",
         (long long)uppOfst, (unsigned long)pMapEntry->lwrPgno, (unsigned long)pMapEntry->cmprOfst, (unsigned long)pMapEntry->cmprSz);
       return SQLITE_OK;
     }else if( cmpSz<oldCmpSz ){
@@ -904,28 +904,18 @@ static int ceshimRead(
   ceshim_info *pInfo = p->pInfo;
   u32 uppPgSz = pInfo->ceshimHeader.uppPgSz;
   int rc;
-  ceshim_printf(pInfo, "%s.xRead(%s,ofst=%lld,amt=%d)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
 
   if( p->pPager && pInfo->pPage1 ){
     DbPage *pPage;
     Pgno uppPgno, mappedPgno;
     CeshimCmpOfst cmprPgOfst;
     CeshimCmpSize uCmpPgSz;
-    if( (rc = ceshimPageMapGet(p, iOfst, &uppPgno, &mappedPgno, &cmprPgOfst, &uCmpPgSz, NULL)) == SQLITE_ERROR ){
-      if( iOfst<uppPgSz ) {
-        mappedPgno = CESHIM_FIRST_MAPPED_PAGE;
-        rc = SQLITE_OK;
-      }
-    }
-    if( mappedPgno==0 ){
-      memset(zBuf, 0, iAmt);
-      return SQLITE_OK;
-    }
-    if( rc==SQLITE_OK &&  (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0)) == SQLITE_OK ){
-      CeshimMemPage *pMemPage = memPageFromDbPage(pPage, mappedPgno);
-      ceshim_printf(pInfo, "\n%s.xRead(%s,pgno=%u->%u,ofst=%lld,amt=%d,cmprPgOfst=%u,cmprSz=%u)",
-        pInfo->zVfsName, p->zFName, uppPgno, mappedPgno, iOfst, iAmt, cmprPgOfst, uCmpPgSz);
-      if( uCmpPgSz > 0 ){ // <- should be able to remove this check now
+    if( (rc = ceshimPageMapGet(p, iOfst, &uppPgno, &mappedPgno, &cmprPgOfst, &uCmpPgSz, NULL)) == SQLITE_OK ){
+      if( rc==SQLITE_OK &&  (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0)) == SQLITE_OK ){
+        CeshimMemPage *pMemPage = memPageFromDbPage(pPage, mappedPgno);
+        ceshim_printf(pInfo, "%s.xRead(%s,pgno=%u->%u,ofst=%08lld->%u,amt=%d->%u)",
+          pInfo->zVfsName, p->zFName, uppPgno, mappedPgno, iOfst, cmprPgOfst, iAmt, uCmpPgSz);
+        assert( uCmpPgSz > 0 );
         int iDstAmt = uppPgSz;
         void *pBuf = sqlite3_malloc(iDstAmt);
         pInfo->xUncompress(
@@ -933,20 +923,22 @@ static int ceshimRead(
           pBuf,
           &iDstAmt,
           (char *)pMemPage->aData
-            +pMemPage->dbHdrOffset
-            +pMemPage->pgHdrOffset
-            +cmprPgOfst,
+          +pMemPage->dbHdrOffset
+          +pMemPage->pgHdrOffset
+          +cmprPgOfst,
           uCmpPgSz
         );
         u16 uBufOfst = iOfst % uppPgSz;
         memcpy(zBuf, pBuf+uBufOfst, iAmt);
         sqlite3_free(pBuf);
-      }else{
-        memset(zBuf, 0, iAmt);
+        sqlite3PagerUnref(pPage);
       }
-      sqlite3PagerUnref(pPage);
+    }else{
+      memset(zBuf, 0, iAmt);
+      rc = SQLITE_OK;
     }
   }else{
+    ceshim_printf(pInfo, "%s.xRead(%s,ofst=%08lld,amt=%d)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
     rc = p->pReal->pMethods->xRead(p->pReal, zBuf, iAmt, iOfst);
   }
   ceshim_print_errcode(pInfo, " -> %s\n", rc);
@@ -978,39 +970,38 @@ static int ceshimWrite(
         CeshimCmpOfst cmprPgOfst;
         pInfo->xCompress(NULL, pBuf, &pnDest, (void *)zBuf, iAmt);
         ceshimPageMapSet(p, iOfst, pnDest, &uppPgno, &mappedPgno, &cmprPgOfst);
-        ceshim_printf(pInfo, "%s.xWrite(%s, pgno=%u->%u, offset=%06lld, amt=%06d)", pInfo->zVfsName, p->zFName, uppPgno, mappedPgno, iOfst, iAmt);
         if( rc==SQLITE_OK && (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0))==SQLITE_OK ){
           // write
           CeshimMemPage *pMemPage = memPageFromDbPage(pPage, mappedPgno);
-            if( (rc = ceshimPagerWrite(p, pPage))==SQLITE_OK ){
-              ceshim_printf(
-                pInfo,
-                "\n%s.xWrite(%s, pgno=%u->%u, offset=%06lld, amt=%06d, compressed=%06d)",
-                pInfo->zVfsName,
-                p->zFName, uppPgno, mappedPgno,
-                pMemPage->dbHdrOffset+pMemPage->pgHdrOffset+cmprPgOfst,
-                iAmt, pnDest
-              );
-              memcpy(
-                pMemPage->aData
-                  +pMemPage->dbHdrOffset
-                  +pMemPage->pgHdrOffset
-                  +cmprPgOfst,
-                pBuf,
-                pnDest
-              );
+          if( (rc = ceshimPagerWrite(p, pPage))==SQLITE_OK ){
+            ceshim_printf(
+              pInfo,
+              "%s.xWrite(%s, pgno=%u->%u, offset=%08lld->%06lu, amt=%06d->%06d)",
+              pInfo->zVfsName, p->zFName,
+              uppPgno, mappedPgno,
+              iOfst, (long unsigned)(pMemPage->dbHdrOffset+pMemPage->pgHdrOffset+cmprPgOfst),
+              iAmt, pnDest
+            );
+            memcpy(
+              pMemPage->aData
+                +pMemPage->dbHdrOffset
+                +pMemPage->pgHdrOffset
+                +cmprPgOfst,
+              pBuf,
+              pnDest
+            );
 
-              // Keep track of sizes of upper and lower pagers
-              if( pInfo->ceshimHeader.uppPageFile<uppPgno ) pInfo->ceshimHeader.uppPageFile = uppPgno;
-              if( pInfo->lwrPageFile<mappedPgno ) pInfo->lwrPageFile = mappedPgno;
-            }
+            // Keep track of sizes of upper and lower pagers
+            if( pInfo->ceshimHeader.uppPageFile<uppPgno ) pInfo->ceshimHeader.uppPageFile = uppPgno;
+            if( pInfo->lwrPageFile<mappedPgno ) pInfo->lwrPageFile = mappedPgno;
+          }
           sqlite3PagerUnref(pPage);
         }
         sqlite3_free(pBuf);
       }
     }
   }else{
-    ceshim_printf(pInfo, "%s.xWrite(%s, offset=%06lld, amt=%06d)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
+    ceshim_printf(pInfo, "%s.xWrite(%s, offset=%08lld, amt=%06d)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
     rc = p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
   }
   ceshim_print_errcode(pInfo, " -> %s\n", rc);
