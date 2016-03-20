@@ -11,6 +11,7 @@
 
 #define CESHIM_ERROR                       400
 #define CESHIM_ERROR_PAGE_SIZE_TOO_SMALL   (CESHIM_ERROR | (1<<8))
+#define CESHIM_ERROR_MALFORMED_KEY         (CESHIM_ERROR | (2<<8))
 
 int ceshim_register(
   const char *zName,                /* Name of the newly constructed VFS */
