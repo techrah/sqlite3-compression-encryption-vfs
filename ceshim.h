@@ -19,9 +19,7 @@ int ceshim_register(
   void *pCtx,                       /* Context pointer to be passed to compress functions */
   int (*xCompressBound)(void *pCtx, int nSrc),
   int (*xCompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc),
-  int (*xUncompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc),
-  int (*xOut)(const char*,void*),   /* Output routine. */
-  void *pOutArg                     /* 2nd argument to xOut.  ex: stderr */
+  int (*xUncompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc)
 );
 
 int ceshim_unregister(const char *zName);

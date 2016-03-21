@@ -1,17 +1,19 @@
-﻿/*
+/*
  Compression & Encryption Shim VFS
 */
+#ifndef SQLITE_AMALGAMATION
 #include <stdlib.h>
 #include <string.h>
 #include "sqlite3.h"
 #include "sqliteInt.h"
 #include "pager.h"
 #include "btreeInt.h"
+#endif
+#include <zlib.h>
 #include "ceshim.h"
 
 #include <CommonCrypto/CommonDigest.h>
 #include <CommonCrypto/CommonCryptor.h>
-
 
 // Size of standard Sqlite3 pager header
 #define CESHIM_DB_HEADER1_SZ        100
@@ -26,6 +28,12 @@
 #define CESHIM_FILE_SCHEMA_NO         1
 #define CESHIM_FIRST_MAPPED_PAGE      3
 
+#ifdef SQLITE_DEBUG
+#define CESHIM_PRINTF(a,b,...) ceshim_printf(a,b,##__VA_ARGS__)
+#else
+#define CESHIM_PRINTF(a,b,...)
+#endif
+
 typedef u16 CeshimCmpSize;
 typedef u16 CeshimCmpOfst;
 
@@ -33,7 +41,9 @@ typedef u16 CeshimCmpOfst;
 ** The header string that appears at the beginning of every
 ** SQLite database.
 */
+#ifndef SQLITE_AMALGAMATION
 static const char zMagicHeader[] = SQLITE_FILE_HEADER;
+#endif
 
 /*
 ** Keeps track of data we need to persist for the pager.
@@ -98,13 +108,10 @@ typedef struct ceshim_info ceshim_info;
 struct ceshim_info {
   sqlite3_vfs *pRootVfs;              /* The underlying real VFS */
 
+  // Pointers to custom compress functions implemented by the user
   int (*xCompressBound)(void *pCtx, int nSrc);
   int (*xCompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc);
   int (*xUncompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc);
-
-  // Trace Output
-  int (*xOut)(const char*, void*);    /* Send output here */
-  void *pOutArg;                      /* First argument to xOut */
 
   const char *zVfsName;               /* Name of this VFS */
   char *zUppJournalPath;              /* Path to redirect upper journal */
@@ -243,7 +250,7 @@ static void ceshim_printf(
   va_start(ap, zFormat);
   zMsg = sqlite3_vmprintf(zFormat, ap);
   va_end(ap);
-  pInfo->xOut(zMsg, pInfo->pOutArg);
+  fputs(zMsg, stdout);
   sqlite3_free(zMsg);
 }
 
@@ -313,7 +320,7 @@ static void ceshim_print_errcode(
        break;
     }
   }
-  ceshim_printf(pInfo, zFormat, zVal);
+  CESHIM_PRINTF(pInfo, zFormat, zVal);
 }
 
 /*
@@ -625,7 +632,7 @@ static u16 ceshimSwitchPageMap(ceshim_file *p, sqlite_int64 iUppOfst){
 
   // switch
   if( rc==SQLITE_OK && ix != pInfo->mmTblCurrIx ){
-    ceshim_printf(pInfo, "Switching to map #%u for offset %lld\n", (unsigned)ix, iUppOfst);
+    CESHIM_PRINTF(pInfo, "Switching to map #%u for offset %lld\n", (unsigned)ix, iUppOfst);
     // save
     if( (rc = ceshimSavePagemapData(p))==SQLITE_OK ){
       // reset
@@ -812,7 +819,7 @@ static int ceshimPageMapSet(
 
       *outLwrPgno = pMapEntry->lwrPgno;
       *outCmpOfst = pMapEntry->cmprOfst;
-      ceshim_printf(pInfo, "Updated entry (uppOfst=%lld, lwrPgno=%lu,cmpOfst=%lu,cmpSz=%lu)\n",
+      CESHIM_PRINTF(pInfo, "Updated entry (uppOfst=%lld, lwrPgno=%lu,cmpOfst=%lu,cmpSz=%lu)\n",
         (long long)uppOfst, (unsigned long)pMapEntry->lwrPgno, (unsigned long)pMapEntry->cmprOfst, (unsigned long)pMapEntry->cmprSz);
       return SQLITE_OK;
     }else if( cmpSz<oldCmpSz ){
@@ -826,7 +833,7 @@ static int ceshimPageMapSet(
     sqlite3_int64 nextOfst = ((header->mmTblCurrCnt-1) * header->uppPgSz * pInfo->pgMapMaxCnt) + (header->pgMapCnt * header->uppPgSz);
     while( uppOfst>nextOfst ){
       ceshimAddPageEntry(pFile, nextOfst, 0, NULL, NULL);
-      ceshim_printf(pInfo, "Added intermin entry (uppOfst=%lld, lwrPgno=0,cmpOfst=0,cmpSz=0)\n", (long long)nextOfst);
+      CESHIM_PRINTF(pInfo, "Added intermin entry (uppOfst=%lld, lwrPgno=0,cmpOfst=0,cmpSz=0)\n", (long long)nextOfst);
       nextOfst += header->uppPgSz;
     }
     assert( uppOfst==nextOfst );
@@ -842,7 +849,7 @@ static int ceshimClose(sqlite3_file *pFile){
   ceshim_file *p = (ceshim_file *)pFile;
   ceshim_info *pInfo = p->pInfo;
   int rc = SQLITE_OK;
-  ceshim_printf(pInfo, "%s.xClose(%s)", pInfo->zVfsName, p->zFName);
+  CESHIM_PRINTF(pInfo, "%s.xClose(%s)", pInfo->zVfsName, p->zFName);
 
   if( p->pPager ){
     if( !pInfo->bReadOnly ){
@@ -935,12 +942,12 @@ static int ceshimRead(
     if( (rc = ceshimPageMapGet(p, iOfst, &uppPgno, &mappedPgno, &cmprPgOfst, &uCmpPgSz, NULL)) == SQLITE_OK ){
       if( rc==SQLITE_OK &&  (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0)) == SQLITE_OK ){
         CeshimMemPage *pMemPage = memPageFromDbPage(pPage, mappedPgno);
-        ceshim_printf(pInfo, "%s.xRead(%s,pgno=%u->%u,ofst=%08lld->%u,amt=%d->%u)",
+        CESHIM_PRINTF(pInfo, "%s.xRead(%s,pgno=%u->%u,ofst=%08lld->%u,amt=%d->%u)",
           pInfo->zVfsName, p->zFName, uppPgno, mappedPgno, iOfst, cmprPgOfst, iAmt, uCmpPgSz);
         assert( uCmpPgSz > 0 );
         int iDstAmt = uppPgSz;
         void *pUncBuf = sqlite3_malloc(iDstAmt);
-        
+
         if( pUncBuf ){
           // decrypt
           void *iv =
@@ -966,7 +973,7 @@ static int ceshimRead(
             uCmpPgSz,              // The size of the dataOut buffer in bytes
             &tmp_csz               // On successful return, the number of bytes written to dataOut.
           );
-          
+
           if( ccStatus==kCCSuccess ){
             pInfo->xUncompress(NULL, pUncBuf, &iDstAmt, pCmpBuf, (int)tmp_csz);
             assert( iDstAmt==uppPgSz );
@@ -974,16 +981,16 @@ static int ceshimRead(
             memcpy(zBuf, pUncBuf+uBufOfst, iAmt);
           } else rc = ccStatus;
           sqlite3_free(pUncBuf);
-        }else rc = SQLITE_NOMEM;        
+        }else rc = SQLITE_NOMEM;
         sqlite3PagerUnref(pPage);
       }
     }else{
-      ceshim_printf(pInfo, "%s.xRead(%s,ofst=%08lld,amt=%d)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
+      CESHIM_PRINTF(pInfo, "%s.xRead(%s,ofst=%08lld,amt=%d)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
       memset(zBuf, 0, iAmt);
       rc = SQLITE_OK;
     }
   }else{
-    ceshim_printf(pInfo, "%s.xRead(%s,ofst=%08lld,amt=%d)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
+    CESHIM_PRINTF(pInfo, "%s.xRead(%s,ofst=%08lld,amt=%d)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
     rc = p->pReal->pMethods->xRead(p->pReal, zBuf, iAmt, iOfst);
   }
   ceshim_print_errcode(pInfo, " -> %s\n", rc);
@@ -1015,6 +1022,11 @@ static int ceshimWrite(
       pInfo->xCompress(NULL, pCmpBuf, &pnDest, (void *)zBuf, iAmt);
 
       // encrypt
+      /* According to CCCryptor manpage: "For block ciphers, the output size will always be less than or
+         equal to the input size plus the size of one block." However, there seems to be a bug as normally
+         CCCrypt fails with error code kCCBufferTooSmall when the output buffer size is too small, can
+         crash when size is exactly input size plus size of one block. It works with just 1 more byte.
+         src: https://developer.apple.com/library/ios/documentation/System/Conceptual/ManPages_iPhoneOS/man3/CCCrypt.3cc.html */
       size_t nOutSz = pnDest+kCCBlockSizeAES128+1;
       void* pEncBuf = sqlite3_malloc((int)nOutSz);
       if( pEncBuf ){
@@ -1038,7 +1050,7 @@ static int ceshimWrite(
           nOutSz,                // The size of the dataOut buffer in bytes
           &tmp_csz               // On successful return, the number of bytes written to dataOut.
         );
-        
+
         if( ccStatus==kCCSuccess ){
           tmp_csz += pInfo->iv_sz;
           ceshimPageMapSet(p, iOfst, tmp_csz, &uppPgno, &mappedPgno, &cmprPgOfst);
@@ -1047,7 +1059,7 @@ static int ceshimWrite(
           if( (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0))==SQLITE_OK ){
             CeshimMemPage *pMemPage = memPageFromDbPage(pPage, mappedPgno);
             if( (rc = ceshimPagerWrite(p, pPage))==SQLITE_OK ){
-              ceshim_printf(
+              CESHIM_PRINTF(
                 pInfo,
                 "%s.xWrite(%s, pgno=%u->%u, offset=%08lld->%06lu, amt=%06d->%06d)",
                 pInfo->zVfsName, p->zFName,
@@ -1076,7 +1088,7 @@ static int ceshimWrite(
       sqlite3_free(pCmpBuf);
     }else rc = SQLITE_NOMEM;
   }else{
-    ceshim_printf(pInfo, "%s.xWrite(%s, offset=%08lld, amt=%06d)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
+    CESHIM_PRINTF(pInfo, "%s.xWrite(%s, offset=%08lld, amt=%06d)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
     rc = p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
   }
   ceshim_print_errcode(pInfo, " -> %s\n", rc);
@@ -1090,9 +1102,9 @@ static int ceshimTruncate(sqlite3_file *pFile, sqlite_int64 size){
   ceshim_file *p = (ceshim_file *)pFile;
   ceshim_info *pInfo = p->pInfo;
   int rc;
-  ceshim_printf(pInfo, "%s.xTruncate(%s,%lld)", pInfo->zVfsName, p->zFName, size);
+  CESHIM_PRINTF(pInfo, "%s.xTruncate(%s,%lld)", pInfo->zVfsName, p->zFName, size);
   rc = p->pReal->pMethods->xTruncate(p->pReal, size);
-  ceshim_printf(pInfo, " -> %d\n", rc);
+  CESHIM_PRINTF(pInfo, " -> %d\n", rc);
   return rc;
 }
 
@@ -1113,9 +1125,9 @@ static int ceshimSync(sqlite3_file *pFile, int flags){
   if( flags & ~(SQLITE_SYNC_FULL|SQLITE_SYNC_DATAONLY) ){
     sqlite3_snprintf(sizeof(zBuf)-i, &zBuf[i], "|0x%x", flags);
   }
-  ceshim_printf(pInfo, "%s.xSync(%s,%s)", pInfo->zVfsName, p->zFName, &zBuf[1]);
+  CESHIM_PRINTF(pInfo, "%s.xSync(%s,%s)", pInfo->zVfsName, p->zFName, &zBuf[1]);
   rc = p->pReal->pMethods->xSync(p->pReal, flags);
-  ceshim_printf(pInfo, " -> %d\n", rc);
+  CESHIM_PRINTF(pInfo, " -> %d\n", rc);
   return rc;
 }
 
@@ -1128,7 +1140,7 @@ static int ceshimFileSize(sqlite3_file *pFile, sqlite_int64 *pSize){
   ceshim_info *pInfo = p->pInfo;
   ceshim_header *header = &pInfo->ceshimHeader;
   int rc;
-  ceshim_printf(pInfo, "%s.xFileSize(%s)", pInfo->zVfsName, p->zFName);
+  CESHIM_PRINTF(pInfo, "%s.xFileSize(%s)", pInfo->zVfsName, p->zFName);
   if(p->pPager ){
     *pSize = header->uppPageFile * header->uppPgSz;
     rc = SQLITE_OK;
@@ -1136,7 +1148,7 @@ static int ceshimFileSize(sqlite3_file *pFile, sqlite_int64 *pSize){
     rc = p->pReal->pMethods->xFileSize(p->pReal, pSize);
   }
   ceshim_print_errcode(pInfo, " -> %s,", rc);
-  ceshim_printf(pInfo, " size=%lld\n", *pSize);
+  CESHIM_PRINTF(pInfo, " size=%lld\n", *pSize);
   return rc;
 }
 
@@ -1162,7 +1174,7 @@ static int ceshimLock(sqlite3_file *pFile, int eLock){
   ceshim_file *p = (ceshim_file *)pFile;
   ceshim_info *pInfo = p->pInfo;
   int rc = SQLITE_OK;
-  ceshim_printf(pInfo, "%s.xLock(%s,%s) BYPASS", pInfo->zVfsName, p->zFName, lockName(eLock));
+  CESHIM_PRINTF(pInfo, "%s.xLock(%s,%s) BYPASS", pInfo->zVfsName, p->zFName, lockName(eLock));
   ceshim_print_errcode(pInfo, " -> %s\n", rc);
   return rc;
 }
@@ -1175,7 +1187,7 @@ static int ceshimUnlock(sqlite3_file *pFile, int eLock){
   ceshim_file *p = (ceshim_file *)pFile;
   ceshim_info *pInfo = p->pInfo;
   int rc = SQLITE_OK;
-  ceshim_printf(pInfo, "%s.xUnlock(%s,%s) BYPASS", pInfo->zVfsName, p->zFName, lockName(eLock));
+  CESHIM_PRINTF(pInfo, "%s.xUnlock(%s,%s) BYPASS", pInfo->zVfsName, p->zFName, lockName(eLock));
   ceshim_print_errcode(pInfo, " -> %s\n", rc);
   return rc;
 }
@@ -1189,10 +1201,10 @@ static int ceshimCheckReservedLock(sqlite3_file *pFile, int *pResOut){
   ceshim_info *pInfo = p->pInfo;
   int rc = SQLITE_OK;
   *pResOut = 0; // not locked
-  ceshim_printf(pInfo, "%s.xCheckReservedLock(%s,%d) BYPASS", pInfo->zVfsName, p->zFName);
+  CESHIM_PRINTF(pInfo, "%s.xCheckReservedLock(%s,%d) BYPASS", pInfo->zVfsName, p->zFName);
   ceshim_print_errcode(pInfo, " -> %s", rc);
-  ceshim_printf(pInfo, ", out=%d\n", *pResOut);
-  ceshim_printf(pInfo, "\n");
+  CESHIM_PRINTF(pInfo, ", out=%d\n", *pResOut);
+  CESHIM_PRINTF(pInfo, "\n");
   return rc;
 }
 
@@ -1257,7 +1269,7 @@ static int ceshimFileControl(sqlite3_file *pFile, int op, void *pArg){
       break;
     }
   }
-  ceshim_printf(pInfo, "%s.xFileControl(%s,%s)", pInfo->zVfsName, p->zFName, zOp);
+  CESHIM_PRINTF(pInfo, "%s.xFileControl(%s,%s)", pInfo->zVfsName, p->zFName, zOp);
   rc = p->pReal->pMethods->xFileControl(p->pReal, op, pArg);
   ceshim_print_errcode(pInfo, " -> %s\n", rc);
   if( op==SQLITE_FCNTL_VFSNAME && rc==SQLITE_OK ){
@@ -1266,7 +1278,7 @@ static int ceshimFileControl(sqlite3_file *pFile, int op, void *pArg){
   }
   if( (op==SQLITE_FCNTL_PRAGMA || op==SQLITE_FCNTL_TEMPFILENAME)
    && rc==SQLITE_OK && *(char**)pArg ){
-    ceshim_printf(pInfo, "%s.xFileControl(%s,%s) returns %s", pInfo->zVfsName, p->zFName, zOp, *(char**)pArg);
+    CESHIM_PRINTF(pInfo, "%s.xFileControl(%s,%s) returns %s", pInfo->zVfsName, p->zFName, zOp, *(char**)pArg);
   }
   return rc;
 }
@@ -1278,9 +1290,9 @@ static int ceshimSectorSize(sqlite3_file *pFile){
   ceshim_file *p = (ceshim_file *)pFile;
   ceshim_info *pInfo = p->pInfo;
   int rc;
-  ceshim_printf(pInfo, "%s.xSectorSize(%s)", pInfo->zVfsName, p->zFName);
+  CESHIM_PRINTF(pInfo, "%s.xSectorSize(%s)", pInfo->zVfsName, p->zFName);
   rc = p->pReal->pMethods->xSectorSize(p->pReal);
-  ceshim_printf(pInfo, " -> %d\n", rc);
+  CESHIM_PRINTF(pInfo, " -> %d\n", rc);
   return rc;
 }
 
@@ -1291,9 +1303,9 @@ static int ceshimDeviceCharacteristics(sqlite3_file *pFile){
   ceshim_file *p = (ceshim_file *)pFile;
   ceshim_info *pInfo = p->pInfo;
   int rc;
-  ceshim_printf(pInfo, "%s.xDeviceCharacteristics(%s)", pInfo->zVfsName, p->zFName);
+  CESHIM_PRINTF(pInfo, "%s.xDeviceCharacteristics(%s)", pInfo->zVfsName, p->zFName);
   rc = p->pReal->pMethods->xDeviceCharacteristics(p->pReal);
-  ceshim_printf(pInfo, " -> 0x%08x\n", rc);
+  CESHIM_PRINTF(pInfo, " -> 0x%08x\n", rc);
   return rc;
 }
 
@@ -1314,7 +1326,7 @@ static int ceshimShmLock(sqlite3_file *pFile, int ofst, int n, int flags){
   if( flags & ~(0xf) ){
      sqlite3_snprintf(sizeof(zLck)-i, &zLck[i], "|0x%x", flags);
   }
-  ceshim_printf(pInfo, "%s.xShmLock(%s,ofst=%d,n=%d,%s)", pInfo->zVfsName, p->zFName, ofst, n, &zLck[1]);
+  CESHIM_PRINTF(pInfo, "%s.xShmLock(%s,ofst=%d,n=%d,%s)", pInfo->zVfsName, p->zFName, ofst, n, &zLck[1]);
   rc = p->pReal->pMethods->xShmLock(p->pReal, ofst, n, flags);
   ceshim_print_errcode(pInfo, " -> %s\n", rc);
   return rc;
@@ -1329,7 +1341,7 @@ static int ceshimShmMap(
   ceshim_file *p = (ceshim_file *)pFile;
   ceshim_info *pInfo = p->pInfo;
   int rc;
-  ceshim_printf(pInfo, "%s.xShmMap(%s,iRegion=%d,szRegion=%d,isWrite=%d,*)", pInfo->zVfsName, p->zFName, iRegion, szRegion, isWrite);
+  CESHIM_PRINTF(pInfo, "%s.xShmMap(%s,iRegion=%d,szRegion=%d,isWrite=%d,*)", pInfo->zVfsName, p->zFName, iRegion, szRegion, isWrite);
   rc = p->pReal->pMethods->xShmMap(p->pReal, iRegion, szRegion, isWrite, pp);
   ceshim_print_errcode(pInfo, " -> %s\n", rc);
   return rc;
@@ -1337,21 +1349,21 @@ static int ceshimShmMap(
 static void ceshimShmBarrier(sqlite3_file *pFile){
   ceshim_file *p = (ceshim_file *)pFile;
   ceshim_info *pInfo = p->pInfo;
-  ceshim_printf(pInfo, "%s.xShmBarrier(%s)\n", pInfo->zVfsName, p->zFName);
+  CESHIM_PRINTF(pInfo, "%s.xShmBarrier(%s)\n", pInfo->zVfsName, p->zFName);
   p->pReal->pMethods->xShmBarrier(p->pReal);
 }
 static int ceshimShmUnmap(sqlite3_file *pFile, int delFlag){
   ceshim_file *p = (ceshim_file *)pFile;
   ceshim_info *pInfo = p->pInfo;
   int rc;
-  ceshim_printf(pInfo, "%s.xShmUnmap(%s,delFlag=%d)", pInfo->zVfsName, p->zFName, delFlag);
+  CESHIM_PRINTF(pInfo, "%s.xShmUnmap(%s,delFlag=%d)", pInfo->zVfsName, p->zFName, delFlag);
   rc = p->pReal->pMethods->xShmUnmap(p->pReal, delFlag);
   ceshim_print_errcode(pInfo, " -> %s\n", rc);
   return rc;
 }
 
 
-static void pageReinit(DbPage *pData) {
+static void ceshimPageReinit(DbPage *pData) {
 
 }
 
@@ -1416,7 +1428,7 @@ static int ceshimOpen(
   // open file
   if( flags & SQLITE_OPEN_READONLY ) pInfo->bReadOnly = 1;
   rc = pRoot->xOpen(pRoot, zName, p->pReal, flags, pOutFlags);
-  ceshim_printf(pInfo, "%s.xOpen(%s,flags=0x%x)",pInfo->zVfsName, p->zFName, flags);
+  CESHIM_PRINTF(pInfo, "%s.xOpen(%s,flags=0x%x)",pInfo->zVfsName, p->zFName, flags);
 
   if( rc==SQLITE_OK ){
     // hook up I/O methods
@@ -1448,7 +1460,7 @@ static int ceshimOpen(
 
     // create pager to handle I/O to compressed/encrypted underlying db
     if( flags & (SQLITE_OPEN_MAIN_DB | SQLITE_OPEN_TEMP_DB | SQLITE_OPEN_TRANSIENT_DB) ){
-      if( (rc = sqlite3PagerOpen(pInfo->pRootVfs, &p->pPager, zName, EXTRA_SIZE, 0, flags, pageReinit))==SQLITE_OK){
+      if( (rc = sqlite3PagerOpen(pInfo->pRootVfs, &p->pPager, zName, EXTRA_SIZE, 0, flags, ceshimPageReinit))==SQLITE_OK){
         if( rc==SQLITE_OK ){
           sqlite3PagerSetJournalMode(p->pPager, PAGER_JOURNALMODE_DELETE);
 //          sqlite3PagerJournalSizeLimit(p->pPager, -1);
@@ -1480,9 +1492,9 @@ static int ceshimOpen(
 
   ceshim_print_errcode(pInfo, " -> %s", rc);
   if( pOutFlags ){
-    ceshim_printf(pInfo, ", outFlags=0x%x\n", *pOutFlags);
+    CESHIM_PRINTF(pInfo, ", outFlags=0x%x\n", *pOutFlags);
   }else{
-    ceshim_printf(pInfo, "\n");
+    CESHIM_PRINTF(pInfo, "\n");
   }
   return rc;
 }
@@ -1497,7 +1509,7 @@ static int ceshimDelete(sqlite3_vfs *pVfs, const char *_zPath, int dirSync){
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
   int rc;
   const char *zPath = ceshimMapPath(pInfo, _zPath);
-  ceshim_printf(pInfo, "%s.xDelete(\"%s\",%d)", pInfo->zVfsName, zPath, dirSync);
+  CESHIM_PRINTF(pInfo, "%s.xDelete(\"%s\",%d)", pInfo->zVfsName, zPath, dirSync);
   rc = pRoot->xDelete(pRoot, zPath, dirSync);
   ceshim_print_errcode(pInfo, " -> %s\n", rc);
   return rc;
@@ -1518,10 +1530,10 @@ static int ceshimAccess(
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
   const char *zPath = ceshimMapPath(pInfo, _zPath);
   int rc = SQLITE_OK;
-  ceshim_printf(pInfo, "%s.xAccess(\"%s\",%d)", pInfo->zVfsName, zPath, flags);
+  CESHIM_PRINTF(pInfo, "%s.xAccess(\"%s\",%d)", pInfo->zVfsName, zPath, flags);
   rc = pRoot->xAccess(pRoot, zPath, flags, pResOut);
   ceshim_print_errcode(pInfo, " -> %s", rc);
-  ceshim_printf(pInfo, ", out=%d\n", *pResOut);
+  CESHIM_PRINTF(pInfo, ", out=%d\n", *pResOut);
   return rc;
 }
 
@@ -1539,10 +1551,10 @@ static int ceshimFullPathname(
   ceshim_info *pInfo = (ceshim_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
   int rc;
-  ceshim_printf(pInfo, "%s.xFullPathname(\"%s\")", pInfo->zVfsName, zPath);
+  CESHIM_PRINTF(pInfo, "%s.xFullPathname(\"%s\")", pInfo->zVfsName, zPath);
   rc = pRoot->xFullPathname(pRoot, zPath, nOut, zOut);
   ceshim_print_errcode(pInfo, " -> %s", rc);
-  ceshim_printf(pInfo, ", out=\"%.*s\"\n", nOut, zOut);
+  CESHIM_PRINTF(pInfo, ", out=\"%.*s\"\n", nOut, zOut);
   return rc;
 }
 
@@ -1552,7 +1564,7 @@ static int ceshimFullPathname(
 static void *ceshimDlOpen(sqlite3_vfs *pVfs, const char *zPath){
   ceshim_info *pInfo = (ceshim_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
-  ceshim_printf(pInfo, "%s.xDlOpen(\"%s\")\n", pInfo->zVfsName, zPath);
+  CESHIM_PRINTF(pInfo, "%s.xDlOpen(\"%s\")\n", pInfo->zVfsName, zPath);
   return pRoot->xDlOpen(pRoot, zPath);
 }
 
@@ -1564,9 +1576,9 @@ static void *ceshimDlOpen(sqlite3_vfs *pVfs, const char *zPath){
 static void ceshimDlError(sqlite3_vfs *pVfs, int nByte, char *zErrMsg){
   ceshim_info *pInfo = (ceshim_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
-  ceshim_printf(pInfo, "%s.xDlError(%d)", pInfo->zVfsName, nByte);
+  CESHIM_PRINTF(pInfo, "%s.xDlError(%d)", pInfo->zVfsName, nByte);
   pRoot->xDlError(pRoot, nByte, zErrMsg);
-  ceshim_printf(pInfo, " -> \"%s\"", zErrMsg);
+  CESHIM_PRINTF(pInfo, " -> \"%s\"", zErrMsg);
 }
 
 /*
@@ -1575,7 +1587,7 @@ static void ceshimDlError(sqlite3_vfs *pVfs, int nByte, char *zErrMsg){
 static void (*ceshimDlSym(sqlite3_vfs *pVfs,void *p,const char *zSym))(void){
   ceshim_info *pInfo = (ceshim_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
-  ceshim_printf(pInfo, "%s.xDlSym(\"%s\")\n", pInfo->zVfsName, zSym);
+  CESHIM_PRINTF(pInfo, "%s.xDlSym(\"%s\")\n", pInfo->zVfsName, zSym);
   return pRoot->xDlSym(pRoot, p, zSym);
 }
 
@@ -1585,7 +1597,7 @@ static void (*ceshimDlSym(sqlite3_vfs *pVfs,void *p,const char *zSym))(void){
 static void ceshimDlClose(sqlite3_vfs *pVfs, void *pHandle){
   ceshim_info *pInfo = (ceshim_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
-  ceshim_printf(pInfo, "%s.xDlOpen()\n", pInfo->zVfsName);
+  CESHIM_PRINTF(pInfo, "%s.xDlOpen()\n", pInfo->zVfsName);
   pRoot->xDlClose(pRoot, pHandle);
 }
 
@@ -1596,7 +1608,7 @@ static void ceshimDlClose(sqlite3_vfs *pVfs, void *pHandle){
 static int ceshimRandomness(sqlite3_vfs *pVfs, int nByte, char *zBufOut){
   ceshim_info *pInfo = (ceshim_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
-  ceshim_printf(pInfo, "%s.xRandomness(%d)\n", pInfo->zVfsName, nByte);
+  CESHIM_PRINTF(pInfo, "%s.xRandomness(%d)\n", pInfo->zVfsName, nByte);
   return pRoot->xRandomness(pRoot, nByte, zBufOut);
 }
 
@@ -1671,15 +1683,14 @@ static const char *ceshimNextSystemCall(sqlite3_vfs *pVfs, const char *_zName){
 ** SQLITE_NOMEM is returned in the case of a memory allocation error.
 ** SQLITE_NOTFOUND is returned if zOldVfsName does not exist.
 */
-int ceshim_register(
+int _ceshim_register(
   const char *zName,                /* Name of the newly constructed VFS */
   const char *zParent,              /* Name of the underlying VFS */
   void *pCtx,
   int (*xCompressBound)(void *, int nSrc),
   int (*xCompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc),
   int (*xUncompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc),
-  int (*xOut)(const char*,void*),   /* Output routine. */
-  void *pOutArg                     /* 2nd argument to xOut.  ex: stderr */
+  int makeDflt
 ){
   sqlite3_vfs *pNew;
   sqlite3_vfs *pRoot;
@@ -1731,8 +1742,6 @@ int ceshim_register(
     }
   }
   pInfo->pRootVfs = pRoot;
-  pInfo->xOut = xOut;
-  pInfo->pOutArg = pOutArg;
   pInfo->zVfsName = pNew->zName;
   pInfo->pCeshimVfs = pNew;
   pInfo->xCompressBound = xCompressBound;
@@ -1746,8 +1755,19 @@ int ceshim_register(
   pInfo->key_sz = kCCKeySizeAES256;  // 32
   pInfo->iv_sz = kCCBlockSizeAES128; // 16
 
-  ceshim_printf(pInfo, "%s.enabled_for(\"%s\")\n", pInfo->zVfsName, pRoot->zName);
-  return sqlite3_vfs_register(pNew, 0);
+  CESHIM_PRINTF(pInfo, "%s.enabled_for(\"%s\")\n", pInfo->zVfsName, pRoot->zName);
+  return sqlite3_vfs_register(pNew, makeDflt);
+}
+
+int ceshim_register(
+  const char *zName,                /* Name of the newly constructed VFS */
+  const char *zParent,              /* Name of the underlying VFS */
+  void *pCtx,
+  int (*xCompressBound)(void *, int nSrc),
+  int (*xCompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc),
+  int (*xUncompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc)
+){
+  return _ceshim_register(zName, zParent, pCtx, xCompressBound, xCompress, xUncompress, 0);
 }
 
 int ceshim_unregister(const char *zName){
@@ -1758,4 +1778,32 @@ int ceshim_unregister(const char *zName){
     return SQLITE_OK;
   }
   return SQLITE_NOTFOUND;
+}
+
+int ceshimDefaultCompressBound(void *p, int nByte) {
+  return (int)compressBound(nByte);
+}
+
+int ceshimDefaultCompress(void *p, char *aDest, int *pnDest, char *aSrc, int nSrc) {
+  uLongf n = *pnDest;             /* In/out buffer size for compress() */
+  int rc;                         /* compress() return code */
+
+  rc = compress((Bytef*)aDest, &n, (Bytef*)aSrc, nSrc);
+  *pnDest = (int)n;
+  return (rc==Z_OK ? SQLITE_OK : SQLITE_ERROR);
+}
+
+int ceshimDefaultUncompress(void *p, char *aDest, int *pnDest, char *aSrc, int nSrc) {
+  uLongf n = *pnDest;             /* In/out buffer size for uncompress() */
+  int rc;                         /* uncompress() return code */
+
+  rc = uncompress((Bytef*)aDest, &n, (Bytef*)aSrc, nSrc);
+  *pnDest = (int)n;
+  return (rc==Z_OK ? SQLITE_OK : SQLITE_ERROR);
+}
+
+SQLITE_API void SQLITE_STDCALL sqlite3_activate_cerod(
+  const char *zPassPhrase        /* Activation phrase */
+){
+  _ceshim_register("ceshim-cli", NULL, NULL, ceshimDefaultCompressBound, ceshimDefaultCompress, ceshimDefaultUncompress, 1);
 }
