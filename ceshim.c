@@ -602,30 +602,15 @@ static u16 ceshimSwitchPageMap(ceshim_file *p, sqlite_int64 iUppOfst){
   ceshim_header *header = &pInfo->ceshimHeader;
   u16 ix = 0;
 
-  // find page map
-#if 1
+  /*
+    Calculate map index based on upper pager offset.
+    Check last entry first as an optimization in case we are writing.
+    Perhaps we can do this check only when we are writing, skip for read-only.
+  */
   ix = iUppOfst >= (pInfo->nBytesPerPgMap * header->mmTblCurrCnt)
     ? header->mmTblCurrCnt-1
     : (u16)(iUppOfst / pInfo->nBytesPerPgMap);
   if( ix<header->mmTblCurrCnt ) rc=SQLITE_OK;
-#else
-  // check last entry first (edge case)
-  if( iUppOfst >= pInfo->mmTbl[header->mmTblCurrCnt-1].uppOfst ){
-    ix = header->mmTblCurrCnt-1;
-    rc = SQLITE_OK;
-  }else{
-    for(int i=0; i<header->mmTblCurrCnt-1; i++){
-      if(
-        pInfo->mmTbl[i].uppOfst <= iUppOfst
-        && iUppOfst < pInfo->mmTbl[i+1].uppOfst
-      ){
-        ix = i;
-        rc = SQLITE_OK;
-        break;
-      }
-    }
-  }
-#endif
 
   // switch
   if( rc==SQLITE_OK && ix != pInfo->mmTblCurrIx ){
