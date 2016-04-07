@@ -491,6 +491,11 @@ static int ceshimPagerLock(ceshim_file *p){
         }else{
           // restore some data
           rc = ceshimLoadHeader(p);
+          if( rc==SQLITE_OK && pInfo->ceshimHeader.schema > CESHIM_FILE_SCHEMA_NO ){
+            // The file schema# is larger than this version can handle.
+            // A newer version is needed to read this file.
+            rc = CESHIM_ERROR_EXT_VERSION_TOO_OLD;
+          }
           if( rc==SQLITE_OK ) rc = ceshimLoadMMTbl(p);
           if( rc==SQLITE_OK ) rc = ceshimLoadPagemapData(p, 0);
         }

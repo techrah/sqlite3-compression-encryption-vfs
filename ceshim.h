@@ -9,9 +9,10 @@
 #ifndef ceshim_h
 #define ceshim_h
 
-#define CESHIM_ERROR                       400
+#define CESHIM_ERROR                       111
 #define CESHIM_ERROR_PAGE_SIZE_TOO_SMALL   (CESHIM_ERROR | (1<<8))
 #define CESHIM_ERROR_MALFORMED_KEY         (CESHIM_ERROR | (2<<8))
+#define CESHIM_ERROR_EXT_VERSION_TOO_OLD   (CESHIM_ERROR | (3<<8))
 
 int ceshim_register(
   const char *zName,                /* Name of the newly constructed VFS */
