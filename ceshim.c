@@ -9,6 +9,7 @@
 #include "pager.h"
 #include "btreeInt.h"
 #endif
+#include <sys/stat.h>
 #include <zlib.h>
 #include "ceshim.h"
 
@@ -104,21 +105,17 @@ struct __attribute__ ((__packed__)) ceshim_map_entry {
 ** An instance of this structure is attached to each ceshim VFS to
 ** provide auxiliary non-persisted information.
 */
+typedef struct ceshim_file ceshim_file;
 typedef struct ceshim_info ceshim_info;
 struct ceshim_info {
-  sqlite3_vfs *pRootVfs;              /* The underlying real VFS */
-
-  // Pointers to custom compress functions implemented by the user
-  int (*xCompressBound)(void *pCtx, int nSrc);
-  int (*xCompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc);
-  int (*xUncompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc);
-
-  const char *zVfsName;               /* Name of this VFS */
-  char *zUppJournalPath;              /* Path to redirect upper journal */
-  sqlite3_vfs *pCeshimVfs;            /* Pointer back to the ceshim VFS */
-  unsigned char zDbHeader[100];       /* Sqlite3 DB header */
-  ceshim_header ceshimHeader;         /* Ceshim header with page mapping data */
-  CeshimMemPage *pPage1;              /* Page 1 of the pager */
+  sqlite3_vfs *pRootVfs;              // The underlying real VFS
+  const char *zVfsName;               // Name of this VFS
+  char *zUppJournalPath;              // Path to redirect upper journal
+  sqlite3_vfs *pCeshimVfs;            // Pointer back to the ceshim VFS
+  ceshim_file *pFile;                 // Pointer back to the ceshim_file representing the dest. db.
+  unsigned char zDbHeader[100];       // Sqlite3 DB header
+  ceshim_header ceshimHeader;         // Ceshim header with page mapping data
+  CeshimMemPage *pPage1;              // Page 1 of the pager
   Pgno lwrPageFile;                   // max pgno in lower pager, used to update pager header
   CeshimMMTblEntry *mmTbl;            // The master mapping table
   u16 mmTblCurrIx;                    // Index of the current page map in mmTbl
@@ -134,12 +131,16 @@ struct ceshim_info {
   // bools
   u8 bPgMapDirty:1;                   // Curr page map needs to be persisted
   u8 bReadOnly:1;                     // True when db was open for read-only
+
+  // Pointers to custom compress functions implemented by the user
+  int (*xCompressBound)(void *pCtx, int nSrc);
+  int (*xCompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc);
+  int (*xUncompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc);
 };
 
 /*
 ** The sqlite3_file object for the shim.
 */
-typedef struct ceshim_file ceshim_file;
 struct ceshim_file {
   sqlite3_file base;                /* Base class.  Must be first */
   ceshim_info *pInfo;               /* Custom info for this file */
@@ -1419,6 +1420,9 @@ static int ceshimOpen(
   p->zFName = zName ? fileTail(zName) : "<temp>";
   p->pReal = (sqlite3_file *)&p[1];
   p->pPager = NULL;
+  
+  // We need this for import
+  pInfo->pFile = p;
 
   // Process URI parameters
   if( flags & SQLITE_OPEN_URI){
@@ -1811,4 +1815,72 @@ SQLITE_API void SQLITE_STDCALL sqlite3_activate_cerod(
   const char *zPassPhrase        /* Activation phrase */
 ){
   _ceshim_register("ceshim-cli", NULL, NULL, ceshimDefaultCompressBound, ceshimDefaultCompress, ceshimDefaultUncompress, 1);
+}
+
+int ceshimBuild(const char *srcDbPath, const char *destUri){
+  int rc = SQLITE_ERROR;
+  unsigned char zDbHeader[100];
+  
+  // _ceshim_register must be done early enough to avoid SQLITE_MISUSE error
+  if( (rc = _ceshim_register("ceshim-build", NULL, NULL, ceshimDefaultCompressBound, ceshimDefaultCompress, ceshimDefaultUncompress, 0))==SQLITE_OK ){
+    sqlite3_vfs *pVfs = sqlite3_vfs_find(NULL);
+    if( pVfs ){
+      Pager *pPager;
+      int vfsFlags = SQLITE_OPEN_READONLY | SQLITE_OPEN_MAIN_DB | SQLITE_OPEN_URI;
+      if( (rc = sqlite3PagerOpen(pVfs, &pPager, srcDbPath, EXTRA_SIZE, 0, vfsFlags, ceshimPageReinit))==SQLITE_OK ){
+        sqlite3PagerSetJournalMode(pPager, PAGER_JOURNALMODE_OFF);
+        if( (rc = sqlite3PagerReadFileheader(pPager,sizeof(zDbHeader),zDbHeader)) == SQLITE_OK ){
+          u32 pageSize = (zDbHeader[16]<<8) | (zDbHeader[17]<<16);
+          if( pageSize>=512 && pageSize<=SQLITE_MAX_PAGE_SIZE  // validate range
+            && ((pageSize-1)&pageSize)==0 ){                   // validate page size is a power of 2
+            u8 nReserve = zDbHeader[20];
+            if( (rc = sqlite3PagerSetPagesize(pPager, &pageSize, nReserve)) == SQLITE_OK ){
+              u32 fileChangeCounter = sqlite3Get4byte(zDbHeader+24);
+              u32 pageCount = sqlite3Get4byte(zDbHeader+28);
+              u32 schemaFormat = sqlite3Get4byte(zDbHeader+44);
+              u32 versionValidForNumber = sqlite3Get4byte(zDbHeader+92);
+              
+              // If we didn't get page count, figure it out from the file size
+              if( !(pageCount>0 && fileChangeCounter==versionValidForNumber) ){
+                struct stat st;
+                if( stat(srcDbPath, &st)==0 ){
+                  off_t size = st.st_size;
+                  pageCount = st.st_size/pageSize;
+                }
+              }
+              
+              // lock pager, prepare to read
+              if( rc==SQLITE_OK && (rc = sqlite3PagerSharedLock(pPager))==SQLITE_OK ){
+                // get destination ready to receive data
+                sqlite3 *pDb;
+                if( (rc = sqlite3_open_v2(destUri, &pDb, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE, "ceshim-build"))==SQLITE_OK ){
+                  sqlite3_vfs *pVfs = sqlite3_vfs_find("ceshim-build");
+                  ceshim_info *pInfo = (ceshim_info *)pVfs->pAppData;
+                  // import all pages
+                  for(Pgno i=0; i<pageCount; i++){
+                    // read source page
+                    DbPage *pPage;
+                    rc = sqlite3PagerGet(pPager, i+1, &pPage, 0);
+                    if( rc==SQLITE_OK ){
+                      // write destination page
+                      void *pData = sqlite3PagerGetData(pPage);
+                      rc = ceshimWrite((sqlite3_file *)pInfo->pFile, pData, pageSize, pageSize*i);
+                      if (i>1) sqlite3PagerUnref(pPage);
+                      if( rc != SQLITE_OK ) break;
+                    }else{
+                      break;
+                    }
+                  }
+                  rc = sqlite3_close(pDb);
+                }
+              }
+            }
+          }
+        }else{
+          rc = SQLITE_CORRUPT;
+        }
+      }
+    }
+  }
+  return rc;
 }

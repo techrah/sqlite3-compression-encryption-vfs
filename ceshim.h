@@ -25,4 +25,11 @@ int ceshim_register(
 
 int ceshim_unregister(const char *zName);
 
+/*!
+\brief Create new compresses/encrypted database from existing database.
+\param srcDbPath Standard path to existing uncompressed, unencrypted SQLite database file.
+\param destUri URI of non-existing destination database file with optional parameters (block_size, key)
+*/
+int ceshimBuild(const char *srcDbPath, const char *destUri);
+
 #endif /* ceshim_h */
