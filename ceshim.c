@@ -118,6 +118,7 @@ struct ceshim_info {
   int iv_sz;                          // IV blob size in bytes
 
   // Pointers to custom compress functions implemented by the user
+  void *pCtx;
   int (*xCompressBound)(void *pCtx, int nSrc);
   int (*xCompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc);
   int (*xUncompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc);
@@ -987,7 +988,7 @@ static int ceshimRead(
           );
 
           if( ccStatus==kCCSuccess ){
-            pInfo->xUncompress(NULL, pUncBuf, &iDstAmt, pCmpBuf, (int)tmp_csz);
+            pInfo->xUncompress(pInfo->pCtx, pUncBuf, &iDstAmt, pCmpBuf, (int)tmp_csz);
             assert( iDstAmt==uppPgSz );
             u16 uBufOfst = iOfst % uppPgSz;
             memcpy(zBuf, pUncBuf+uBufOfst, iAmt);
@@ -1028,11 +1029,11 @@ static int ceshimWrite(
     
     if( !p->bReadOnly ){
       // compress
-      int pnDest = pInfo->xCompressBound(NULL, iAmt);
+      int pnDest = pInfo->xCompressBound(pInfo->pCtx, iAmt);
       void* pCmpBuf = sqlite3_malloc(pnDest);
       if( pCmpBuf ){
         CeshimCmpOfst cmprPgOfst;
-        pInfo->xCompress(NULL, pCmpBuf, &pnDest, (void *)zBuf, iAmt);
+        pInfo->xCompress(pInfo->pCtx, pCmpBuf, &pnDest, (void *)zBuf, iAmt);
         
         // encrypt
         /* According to CCCryptor manpage: "For block ciphers, the output size will always be less than or
@@ -1700,7 +1701,7 @@ static int ceshimGetLastError(sqlite3_vfs *pVfs, int iErr, char *zErr){
 }
 
 /*
-** Clients invoke this routine to construct a new ceshim.
+** Clients invoke ceshim_register to construct a new ceshim.
 **
 ** Return SQLITE_OK on success.
 **
@@ -1708,9 +1709,9 @@ static int ceshimGetLastError(sqlite3_vfs *pVfs, int iErr, char *zErr){
 ** SQLITE_NOTFOUND is returned if zOldVfsName does not exist.
 */
 int _ceshim_register(
-  const char *zName,                // Name of the newly constructed VFS
-  const char *zParent,              // Name of the underlying VFS
-  void *pCtx,                       // Currently not used. Use to pass contectual data to cmpression routines
+  const char *zName,
+  const char *zParent,
+  void *pCtx,
   int (*xCompressBound)(void *, int nSrc),
   int (*xCompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc),
   int (*xUncompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc),
@@ -1742,7 +1743,6 @@ int _ceshim_register(
 
   // Intialize data
   memcpy((char*)&pInfo[1], zName, nName+1);
-  pInfo->cerod_activated = cerodActivated;
   pNew->iVersion = pRoot->iVersion;
   pNew->szOsFile = pRoot->szOsFile + sizeof(ceshim_file);
   pNew->mxPathname = pRoot->mxPathname;
@@ -1767,9 +1767,11 @@ int _ceshim_register(
       pNew->xNextSystemCall = 0;
     }
   }
+  pInfo->cerod_activated = cerodActivated;
   pInfo->pRootVfs = pRoot;
   pInfo->zVfsName = pNew->zName;
   pInfo->pCeshimVfs = pNew;
+  pInfo->pCtx = pCtx;
   pInfo->xCompressBound = xCompressBound;
   pInfo->xCompress = xCompress;
   pInfo->xUncompress = xUncompress;
@@ -1781,9 +1783,9 @@ int _ceshim_register(
 }
 
 int ceshim_register(
-  const char *zName,                /* Name of the newly constructed VFS */
-  const char *zParent,              /* Name of the underlying VFS */
-  void *pCtx,
+  const char *zName,                // Name of the newly constructed VFS
+  const char *zParent,              // Name of the underlying VFS
+  void *pCtx,                       // Used to pass contextual data to compression routines
   int (*xCompressBound)(void *, int nSrc),
   int (*xCompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc),
   int (*xUncompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc)
@@ -1801,11 +1803,11 @@ int ceshim_unregister(const char *zName){
   return SQLITE_NOTFOUND;
 }
 
-int ceshimDefaultCompressBound(void *p, int nByte){
+int ceshimDefaultCompressBound(void *pCtx, int nByte){
   return (int)compressBound(nByte);
 }
 
-int ceshimDefaultCompress(void *p, char *aDest, int *pnDest, char *aSrc, int nSrc){
+int ceshimDefaultCompress(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc){
   uLongf n = *pnDest;             /* In/out buffer size for compress() */
   int rc;                         /* compress() return code */
 
@@ -1814,7 +1816,7 @@ int ceshimDefaultCompress(void *p, char *aDest, int *pnDest, char *aSrc, int nSr
   return (rc==Z_OK ? SQLITE_OK : SQLITE_ERROR);
 }
 
-int ceshimDefaultUncompress(void *p, char *aDest, int *pnDest, char *aSrc, int nSrc){
+int ceshimDefaultUncompress(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc){
   uLongf n = *pnDest;             /* In/out buffer size for uncompress() */
   int rc;                         /* uncompress() return code */
 
