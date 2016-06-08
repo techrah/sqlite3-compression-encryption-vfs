@@ -1862,6 +1862,7 @@ int cevfs_build(const char *srcDbPath, const char *destUri){
                 if( (rc = sqlite3_open_v2(destUri, &pDb, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE, "cevfs-build"))==SQLITE_OK ){
                   sqlite3_vfs *pVfs = sqlite3_vfs_find("cevfs-build");
                   cevfs_info *pInfo = (cevfs_info *)pVfs->pAppData;
+                  DbPage *pPage1 = NULL;
                   // import all pages
                   for(Pgno i=0; i<pageCount; i++){
                     // read source page
@@ -1871,12 +1872,19 @@ int cevfs_build(const char *srcDbPath, const char *destUri){
                       // write destination page
                       void *pData = sqlite3PagerGetData(pPage);
                       rc = cevfsWrite((sqlite3_file *)pInfo->pFile, pData, pageSize, pageSize*i);
-                      if (i>1) sqlite3PagerUnref(pPage);
+                      if (i==0) {
+                        // To be deallocated later
+                        pPage1 = pPage;
+                      }else{
+                        sqlite3PagerUnref(pPage);
+                      }
                       if( rc != SQLITE_OK ) break;
                     }else{
                       break;
                     }
                   }
+                  if (pPage1) sqlite3PagerUnref(pPage1);
+                  sqlite3PagerClose(pPager);
                   rc = sqlite3_close(pDb);
                 }
               }
