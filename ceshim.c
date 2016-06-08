@@ -226,11 +226,25 @@ static const char *fileTail(const char *z){
 ** and not have additional '-' in name. We'll just append "btree" to distinguish it from ours.
 ** Note: everything after the '-' must be alphanumeric only. No punctuation allowed
 ** or an assertion will be triggered in debug mode.
+**
+** If we always had a pointer to the associated ceshim_file when processing a journal filename then
+** we could associate the renamed journal filename with the corresponding database filename and
+** encapsulate the memory management. Since we cannot, we use bMustRelease to assist with memory management.
+**
+** pFile or bMustRelease must be NULL. Both cannot be NULL.
+** If bMustRelease is true upon return, the newly created string must be freed by the caller.
+** Use sqlite3_free to free memory.
 */
 static char * ceshimMapPath(ceshim_file *pFile, const char *zName, bool *bMustRelease){
+  // Only one of pFile or bMustRelease MUST be NULL.
+  assert( !(pFile && bMustRelease) && (pFile || bMustRelease) );
+  
   static const char *zTail = "btree";
   if (bMustRelease) *bMustRelease = false;
-  if( strstr(zName, "-journal")==0 ) return zName;
+  if( strstr(zName, "-journal")==0 ){
+    bMustRelease = false;
+    return (char *)zName;
+  }
   char *zUppJournalPath = pFile ? pFile->zUppJournalPath : NULL;
   if( zUppJournalPath == NULL ){
     zUppJournalPath = sqlite3_malloc((int)(strlen(zName)+strlen(zTail))+1);
@@ -359,7 +373,6 @@ static int ceshimReadUncompressed(
 }
 
 static void ceshimReleasePage1(ceshim_file *p){
-  ceshim_info *pInfo = p->pInfo;
   if( p->pPage1 ){
     sqlite3PagerUnref(p->pPage1->pDbPage);
     p->pPage1 = NULL;
@@ -372,7 +385,6 @@ static void ceshimReleasePage1(ceshim_file *p){
 ** Its size depends on the page size of the lower pager.
 */
 static int ceshimCreateMMTbl(ceshim_file *p, int *memSzOut){
-  ceshim_info *pInfo = p->pInfo;
   u16 maxSz = p->pageSize - CESHIM_DB_HEADER_SIZE;
   u16 maxEntries = maxSz / sizeof(CeshimMMTblEntry);
 
@@ -392,7 +404,6 @@ static int ceshimCreateMMTbl(ceshim_file *p, int *memSzOut){
 
 static int ceshimSavePagemapData(ceshim_file *p){
   int rc = SQLITE_OK;
-  ceshim_info *pInfo = p->pInfo;
   if( p->bPgMapDirty ){
     Pgno pgno = p->mmTbl[p->mmTblCurrIx].lwrPgno;
     rc = ceshimWriteUncompressed(p, pgno, 0, p->pBigEndianPgMap, p->pgMapSz);
@@ -403,7 +414,6 @@ static int ceshimSavePagemapData(ceshim_file *p){
 
 static int ceshimSaveMMTbl(ceshim_file *p){
   int rc;
-  ceshim_info *pInfo = p->pInfo;
   assert( p->bReadOnly==0 );
   ceshim_header *header = &p->ceshimHeader;
   int memSz = header->mmTblMaxCnt*sizeof(CeshimMMTblEntry);
@@ -422,7 +432,6 @@ static int ceshimSaveMMTbl(ceshim_file *p){
 
 static int ceshimLoadPagemapData(ceshim_file *p, u16 ix){
   int rc;
-  ceshim_info *pInfo = p->pInfo;
   ceshim_header *header = &p->ceshimHeader;
   assert( p->bPgMapDirty==0 );
   assert( ix != p->mmTblCurrIx ); // mmTblCurrIx initially large number to mean no entries yet
@@ -443,7 +452,6 @@ static int ceshimLoadPagemapData(ceshim_file *p, u16 ix){
 static int ceshimLoadMMTbl(ceshim_file *p){
   int rc;
   int memSz;
-  ceshim_info *pInfo = p->pInfo;
   ceshim_header *header = &p->ceshimHeader;
   assert( p->mmTbl==NULL );
 
@@ -465,7 +473,6 @@ static int ceshimLoadMMTbl(ceshim_file *p){
 }
 
 static int ceshimPagerLock(ceshim_file *p){
-  ceshim_info *pInfo = p->pInfo;
   int rc;
   assert( p->pPage1==0 );
   if( (rc = sqlite3PagerSharedLock(p->pPager))==SQLITE_OK ){
@@ -549,7 +556,6 @@ static int ceshimWriteUncompressed(
 }
 
 static int ceshimSaveHeader(ceshim_file *p){
-  ceshim_info *pInfo = p->pInfo;
   assert( p->bReadOnly==0 );
   ceshim_header *header = &p->ceshimHeader;
   u8 buf[CESHIM_DB_HEADER2_SZ];
@@ -599,7 +605,6 @@ static int ceshimNewDatabase(ceshim_file *pFile){
   CeshimMemPage *pP1;
   unsigned char *data;
   int rc;
-  ceshim_info *pInfo = pFile->pInfo;
 
   pP1 = pFile->pPage1;
   data = pP1->aData;
@@ -667,7 +672,6 @@ static int ceshimPageMapGet(
   CeshimCmpSize *outCmpSz,
   u16 *outIx
 ){
-  ceshim_info *pInfo = pFile->pInfo;
   ceshim_header *header = &pFile->ceshimHeader;
   if( outUppPgno ) *outUppPgno = (Pgno)(uSrcOfst/header->uppPgSz+1);
   int currPgMapNo = ceshimSwitchPageMap(pFile, uSrcOfst);
@@ -716,7 +720,6 @@ void ceshimAllocCmpPageSpace(
   CeshimCmpSize cmpSz,          // Current compressed size of data for allocation
   u16 pgMapIx                   // Index of map entry to record allocation data
 ){
-  ceshim_info *pInfo = pFile->pInfo;
   ceshim_header *header = &pFile->ceshimHeader;
   CeshimCmpOfst ofst = header->currPageOfst;
   ceshim_map_entry *pMapEntry = &pFile->pPgMap[pgMapIx];
@@ -753,7 +756,6 @@ int ceshimAddPageEntry(
   Pgno *outLwrPgno
 ){
   assert( (!outCmpOfst && !outLwrPgno) || (outCmpOfst && outLwrPgno) );
-  ceshim_info *pInfo = pFile->pInfo;
   ceshim_header *header = &pFile->ceshimHeader;
 
   // if no more room, start a new pagemap
@@ -1225,7 +1227,6 @@ static int ceshimCheckReservedLock(sqlite3_file *pFile, int *pResOut){
 
 static int ceshimPragma(sqlite3_file *pFile, const char *op, const char *arg){
   ceshim_file *p = (ceshim_file *)pFile;
-  ceshim_info *pInfo = p->pInfo;
   int rc = SQLITE_OK;
   if( strcmp(op, "page_size")==0 ){
     p->ceshimHeader.uppPgSz = (u32)sqlite3Atoi(arg);
@@ -1581,7 +1582,7 @@ static int ceshimAccess(
   ceshim_info *pInfo = (ceshim_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
   bool bMustRelease;
-  const char *zPath = ceshimMapPath(NULL, _zPath, &bMustRelease);
+  char *zPath = ceshimMapPath(NULL, _zPath, &bMustRelease);
   int rc = SQLITE_OK;
   
   CESHIM_PRINTF(pInfo, "%s.xAccess(\"%s\",%d)", pInfo->zVfsName, zPath, flags);
