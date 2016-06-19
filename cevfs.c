@@ -113,15 +113,11 @@ struct cevfs_info {
   sqlite3_vfs *pCevfsVfs;              // Pointer back to the cevfs VFS
   cevfs_file *pFile;                   // Pointer back to the cevfs_file representing the dest. db.
   int cerod_activated;                 // if extension is enabled, make sure read only
-  char *zKey;                          // Encryption key blob for each file opened with this VFS instance
-  int key_sz;                          // Key size in bytes
-  int iv_sz;                           // IV blob size in bytes
 
-  // Pointers to custom compress functions implemented by the user
+  // Pointers to custom compress/encryption functions implemented by the user
   void *pCtx;
-  int (*xCompressBound)(void *pCtx, int nSrc);
-  int (*xCompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc);
-  int (*xUncompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc);
+  t_xAutoDetect xAutoDetect;
+
 };
 
 /*
@@ -135,7 +131,8 @@ struct cevfs_file {
   char *zUppJournalPath;               // Path to redirect upper journal
   unsigned char zDbHeader[100];        // Sqlite3 DB header
   cevfs_header cevfsHeader;            // Cevfs header with page mapping data
-  char *zKey;                          // Encryption key blob for this file
+  CevfsMethods vfsMethods;             // Custom methods for compression/enctyption
+  int nEncIvSz;                        // IV blob size in bytes for encryption/decryption routines
 
   // map
   CevfsMMTblEntry *mmTbl;              // The master mapping table
@@ -146,10 +143,6 @@ struct cevfs_file {
   u16 pgMapSz;                         // Size in bytes for the page map allocation
   u32 nBytesPerPgMap;                  // Performance optimization premultiplication store
 
-  // bools
-  u8 bPgMapDirty:1;                    // Curr page map needs to be persisted
-  u8 bReadOnly:1;                      // True when db was open for read-only
-
   // pager
   CevfsMemPage *pPage1;                // Page 1 of the pager
   Pager *pPager;                       // Pager for I/O with compressed/encrypted file
@@ -157,6 +150,13 @@ struct cevfs_file {
   u32 pageSize;                        // Page size of the lower pager
   u32 usableSize;                      // Number of usable bytes on each page
   u8 nTransactions;                    // Number of open transactions on the pager
+  
+  // bools
+  u8 bPgMapDirty:1;                    // Curr page map needs to be persisted
+  u8 bReadOnly:1;                      // True when db was open for read-only
+  u8 bCompressionEnabled:1;
+  u8 bEncryptionEnabled:1;
+  
 };
 
 /*
@@ -602,16 +602,26 @@ static CevfsMemPage *memPageFromDbPage(DbPage *pDbPage, Pgno mappedPgno){
 }
 
 static int cevfsNewDatabase(cevfs_file *pFile){
-  CevfsMemPage *pP1;
-  unsigned char *data;
+  CevfsMemPage *pP1 = pFile->pPage1;
+  unsigned char *data = pP1->aData;
+  cevfs_info *pInfo = (cevfs_info *)pFile->pInfo;
   int rc;
 
-  pP1 = pFile->pPage1;
-  data = pP1->aData;
   if( (rc = cevfsPagerWrite(pFile, pP1->pDbPage))==SQLITE_OK ){
     // since we are using a secondary pager, set up a proper pager header (see btree.c:1898)
-    memcpy(data, zMagicHeader, sizeof(zMagicHeader));
-    assert( sizeof(zMagicHeader)==16 );
+    
+    // Set first 16 characters (including NULL terminator)
+    // to the name of the VFS prefixed with CEVFS-
+    // This leaves the user with 10 characters to identify the VFS.
+    const char *prefix = "CEVFS-";
+    const int iLen1 = strlen(prefix);
+    const int iLen2 = 15-iLen1;
+    const int iNameLen = strlen(pInfo->zVfsName);
+    memset(data, 0, 16);
+    memcpy(data, prefix, iLen1);
+    memcpy(data+iLen1, pInfo->zVfsName, iNameLen > iLen2 ? iLen2 : iNameLen);
+    assert( strlen(data)<16 );
+    
     data[16] = (u8)((pFile->pageSize>>8)&0xff);
     data[17] = (u8)((pFile->pageSize>>16)&0xff);
     data[18] = 1;
@@ -894,10 +904,6 @@ static int cevfsClose(sqlite3_file *pFile){
           sqlite3_free(p->pBigEndianPgMap);
           p->pBigEndianPgMap = NULL;
         }
-        if( p->zKey ){
-          sqlite3_free(p->zKey);
-          p->zKey = NULL;
-        }
       }
     }
   }
@@ -909,17 +915,6 @@ static int cevfsClose(sqlite3_file *pFile){
 
   cevfs_print_errcode(pInfo, " -> %s\n", rc);
   return rc;
-}
-
-static void random_bytes(unsigned char *buf, int num){
-  int i;
-  int j = num/4;
-  uint32_t *dwbuf = (uint32_t *)buf;
-
-  srandomdev();
-  for( i=0; i<j; i++ ){
-    *(dwbuf+i) = (u_int32_t)random();
-  }
 }
 
 /*
@@ -944,44 +939,61 @@ static int cevfsRead(
     if( (rc = cevfsPageMapGet(p, iOfst, &uppPgno, &mappedPgno, &cmprPgOfst, &uCmpPgSz, NULL)) == SQLITE_OK ){
       if( rc==SQLITE_OK &&  (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0)) == SQLITE_OK ){
         CevfsMemPage *pMemPage = memPageFromDbPage(pPage, mappedPgno);
-        CEVFS_PRINTF(pInfo, "%s.xRead(%s,pgno=%u->%u,ofst=%08lld->%u,amt=%d->%u)",
-                     pInfo->zVfsName, p->zFName, uppPgno, mappedPgno, iOfst, cmprPgOfst, iAmt, uCmpPgSz);
+        CEVFS_PRINTF(
+          pInfo, "%s.xRead(%s,pgno=%u->%u,ofst=%08lld->%u,amt=%d->%u)",
+          pInfo->zVfsName, p->zFName, uppPgno, mappedPgno, iOfst, cmprPgOfst, iAmt, uCmpPgSz
+        );
         assert( uCmpPgSz > 0 );
         int iDstAmt = uppPgSz;
         void *pUncBuf = sqlite3_malloc(iDstAmt);
+        void *pCmpBuf = sqlite3_malloc(uCmpPgSz);
+        int bSuccess = 0;
 
         if( pUncBuf ){
-          // decrypt
+          // If using encryption, the IV is stored first followed by the enctypted data
           void *iv =
             (char *)pMemPage->aData
             +pMemPage->dbHdrOffset
             +pMemPage->pgHdrOffset
             +cmprPgOfst;
-          void *srcData = iv+pInfo->iv_sz;
-          size_t tmp_csz;
-          CCCryptorStatus ccStatus;
 
-          void *pCmpBuf = sqlite3_malloc(uCmpPgSz);
-          ccStatus = CCCrypt(
-            kCCDecrypt,            // enc/dec
-            kCCAlgorithmAES128,    // algorithm
-            0,                     // options: kCCOptionPKCS7Padding, kCCOptionECBMode, 0 = no padding
-            p->zKey,               // 256-bit (32-byte) key
-            pInfo->key_sz,         // key length (bytes)
-            iv,                    // const void *iv
-            srcData,               // const void *dataIn
-            uCmpPgSz-pInfo->iv_sz, // data-in length
-            pCmpBuf,               // dataOut; result is written here.
-            uCmpPgSz,              // The size of the dataOut buffer in bytes
-            &tmp_csz               // On successful return, the number of bytes written to dataOut.
-          );
+          // decrypt
+          if( p->bEncryptionEnabled ){
+            void *srcData = iv+p->nEncIvSz;
+            int nDataInSize = uCmpPgSz-p->nEncIvSz;
+            int nFinalSz;
 
-          if( ccStatus==kCCSuccess ){
-            pInfo->xUncompress(pInfo->pCtx, pUncBuf, &iDstAmt, pCmpBuf, (int)tmp_csz);
-            assert( iDstAmt==uppPgSz );
+            bSuccess = p->vfsMethods.xDecrypt(
+              pInfo->pCtx,
+              srcData,                  // dataIn
+              nDataInSize,              // data-in length
+              iv,                       // IvIn
+              pCmpBuf,                  // dataOut; result is written here.
+              uCmpPgSz,                 // The size of the dataOut buffer in bytes
+              &nFinalSz                 // On successful return, the number of bytes written to dataOut.
+            );
+            
+            if( bSuccess ){
+              uCmpPgSz = nFinalSz;
+            }
+          }else{
+            bSuccess = true;
+            pCmpBuf = iv;
+          }
+
+          // uncompress
+          if( bSuccess ){
+            if( p->bCompressionEnabled ){
+              bSuccess = p->vfsMethods.xUncompress(pInfo->pCtx, pUncBuf, &iDstAmt, pCmpBuf, (int)uCmpPgSz);
+              if( !bSuccess ) return CEVFS_ERROR_DECOMPRESSION_FAILED;
+              assert( iDstAmt==uppPgSz );
+            }else{
+              pUncBuf = pCmpBuf;
+            }
+            sqlite3_free(pCmpBuf);
             u16 uBufOfst = iOfst % uppPgSz;
             memcpy(zBuf, pUncBuf+uBufOfst, iAmt);
-          } else rc = ccStatus;
+          } else rc = CEVFS_ERROR_DECRYPTION_FAILED;
           sqlite3_free(pUncBuf);
         }else rc = SQLITE_NOMEM;
         sqlite3PagerUnref(pPage);
@@ -1018,76 +1030,66 @@ static int cevfsWrite(
 
     if( !p->bReadOnly ){
       // compress
-      int pnDest = pInfo->xCompressBound(pInfo->pCtx, iAmt);
-      void* pCmpBuf = sqlite3_malloc(pnDest);
+      int nDest = p->vfsMethods.xCompressBound(pInfo->pCtx, iAmt);
+      void *pCmpBuf = sqlite3_malloc(nDest);
       if( pCmpBuf ){
         CevfsCmpOfst cmprPgOfst;
-        pInfo->xCompress(pInfo->pCtx, pCmpBuf, &pnDest, (void *)zBuf, iAmt);
+        p->vfsMethods.xCompress(pInfo->pCtx, pCmpBuf, &nDest, (void *)zBuf, iAmt);
 
         // encrypt
-        /* According to CCCryptor manpage: "For block ciphers, the output size will always be less than or
-         equal to the input size plus the size of one block." However, there seems to be a bug as normally
-         CCCrypt fails with error code kCCBufferTooSmall when the output buffer size is too small, can
-         crash when size is exactly input size plus size of one block. It works with just 1 more byte.
-         src: https://developer.apple.com/library/ios/documentation/System/Conceptual/ManPages_iPhoneOS/man3/CCCrypt.3cc.html */
-        size_t nOutSz = pnDest+kCCBlockSizeAES128+1;
-        void* pEncBuf = sqlite3_malloc((int)nOutSz);
-        if( pEncBuf ){
-          void *iv; // initialization vector
-          CCCryptorStatus ccStatus;
-          iv = pEncBuf;
-          pEncBuf += pInfo->iv_sz;
-          random_bytes(iv, pInfo->iv_sz);
-          size_t tmp_csz;
+        void *pEncBuf = NULL;
+        size_t tmp_csz;
+        int bSuccess = 0;
 
-          ccStatus = CCCrypt(
-            kCCEncrypt,            // enc/dec
-            kCCAlgorithmAES128,    // algorithm
-            kCCOptionPKCS7Padding, // options: kCCOptionPKCS7Padding, kCCOptionECBMode, 0 = no padding
-            p->zKey,               // 256-bit (32-byte) key
-            pInfo->key_sz,         // key length (bytes)
-            iv,                    // const void *iv
-            pCmpBuf,               // const void *dataIn
-            pnDest,                // data-in length
-            pEncBuf,               // dataOut; result is written here.
-            nOutSz,                // The size of the dataOut buffer in bytes
-            &tmp_csz               // On successful return, the number of bytes written to dataOut.
+        void *iv = sqlite3_malloc(p->nEncIvSz);
+        if( p->bEncryptionEnabled ){
+          bSuccess = p->vfsMethods.xEncrypt(
+            pInfo->pCtx,
+            pCmpBuf,       // dataIn
+            nDest,         // data-in length
+            iv,            // IV out
+            &pEncBuf,      // dataOut; result is written here.
+            &tmp_csz       // On successful return, the number of bytes written to dataOut.
           );
+        }
 
-          if( ccStatus==kCCSuccess ){
-            tmp_csz += pInfo->iv_sz;
-            cevfsPageMapSet(p, iOfst, tmp_csz, &uppPgno, &mappedPgno, &cmprPgOfst);
+        if( bSuccess && pEncBuf ){
+          // Join IV and pEncBuf. If IV is greater than pInfo->nEncIvSz, it will be truncated.
+          void *pIvEncBuf = sqlite3_realloc(iv, p->nEncIvSz+tmp_csz);
+          memcpy(pIvEncBuf+p->nEncIvSz, pEncBuf, tmp_csz);
 
-            // write
-            if( (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0))==SQLITE_OK ){
-              CevfsMemPage *pMemPage = memPageFromDbPage(pPage, mappedPgno);
-              if( (rc = cevfsPagerWrite(p, pPage))==SQLITE_OK ){
-                CEVFS_PRINTF(
-                  pInfo,
-                  "%s.xWrite(%s, pgno=%u->%u, offset=%08lld->%06lu, amt=%06d->%06d)",
-                  pInfo->zVfsName, p->zFName,
-                  uppPgno, mappedPgno,
-                  iOfst, (unsigned long)(pMemPage->dbHdrOffset+pMemPage->pgHdrOffset+cmprPgOfst),
-                  iAmt, tmp_csz
-                );
-                memcpy(
-                  pMemPage->aData
-                  +pMemPage->dbHdrOffset
-                  +pMemPage->pgHdrOffset
-                  +cmprPgOfst,
-                  iv,
-                  tmp_csz
-                );
+          CevfsCmpSize uIvEncSz = tmp_csz + p->nEncIvSz;
+          cevfsPageMapSet(p, iOfst, uIvEncSz, &uppPgno, &mappedPgno, &cmprPgOfst);
 
-                // Keep track of sizes of upper and lower pagers
-                if( p->cevfsHeader.uppPageFile<uppPgno ) p->cevfsHeader.uppPageFile = uppPgno;
-                if( p->lwrPageFile<mappedPgno ) p->lwrPageFile = mappedPgno;
-              }
-              sqlite3PagerUnref(pPage);
+          // write
+          if( (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0))==SQLITE_OK ){
+            CevfsMemPage *pMemPage = memPageFromDbPage(pPage, mappedPgno);
+            if( (rc = cevfsPagerWrite(p, pPage))==SQLITE_OK ){
+              CEVFS_PRINTF(
+                pInfo,
+                "%s.xWrite(%s, pgno=%u->%u, offset=%08lld->%06lu, amt=%06d->%06d)",
+                pInfo->zVfsName, p->zFName,
+                uppPgno, mappedPgno,
+                iOfst, (unsigned long)(pMemPage->dbHdrOffset+pMemPage->pgHdrOffset+cmprPgOfst),
+                iAmt, uIvEncSz
+              );
+              memcpy(
+                pMemPage->aData
+                +pMemPage->dbHdrOffset
+                +pMemPage->pgHdrOffset
+                +cmprPgOfst,
+                pIvEncBuf,
+                uIvEncSz
+              );
+
+              // Keep track of sizes of upper and lower pagers
+              if( p->cevfsHeader.uppPageFile<uppPgno ) p->cevfsHeader.uppPageFile = uppPgno;
+              if( p->lwrPageFile<mappedPgno ) p->lwrPageFile = mappedPgno;
             }
-          }else rc = ccStatus;
-          sqlite3_free(iv);
-        }else rc = SQLITE_NOMEM;
+            sqlite3PagerUnref(pPage);
+          }
+          sqlite3_free(pIvEncBuf);
+        }else rc = CEVFS_ERROR_ENCRYPTION_FAILED;
         sqlite3_free(pCmpBuf);
       }else rc = SQLITE_NOMEM;
     }else rc = SQLITE_READONLY;
@@ -1231,13 +1233,13 @@ static int cevfsFileControl(sqlite3_file *pFile, int op, void *pArg){
   char zBuf[100];
   char *zOp;
   switch( op ){
+#ifdef SQLITE_DEBUG
     case SQLITE_FCNTL_LOCKSTATE:    zOp = "LOCKSTATE";          break;
     case SQLITE_GET_LOCKPROXYFILE:  zOp = "GET_LOCKPROXYFILE";  break;
     case SQLITE_SET_LOCKPROXYFILE:  zOp = "SET_LOCKPROXYFILE";  break;
     case SQLITE_LAST_ERRNO:         zOp = "LAST_ERRNO";         break;
     case SQLITE_FCNTL_SIZE_HINT: {
-      sqlite3_snprintf(sizeof(zBuf), zBuf, "SIZE_HINT,%lld",
-                       *(sqlite3_int64*)pArg);
+      sqlite3_snprintf(sizeof(zBuf), zBuf, "SIZE_HINT,%lld", *(sqlite3_int64*)pArg);
       zOp = zBuf;
       break;
     }
@@ -1254,6 +1256,12 @@ static int cevfsFileControl(sqlite3_file *pFile, int op, void *pArg){
     case SQLITE_FCNTL_VFSNAME:      zOp = "VFSNAME";            break;
     case SQLITE_FCNTL_TEMPFILENAME: zOp = "TEMPFILENAME";       break;
     case SQLITE_FCNTL_DB_UNCHANGED: zOp = "DB_UNCHANGED";       break;
+    case SQLITE_FCNTL_MMAP_SIZE: {
+      sqlite3_snprintf(sizeof(zBuf), zBuf, "SQLITE_FCNTL_MMAP_SIZE,%d", *(int*)pArg);
+      zOp = zBuf;
+      break;
+    }
+#endif
     case SQLITE_FCNTL_PRAGMA: {
       const char *const* a = (const char*const*)pArg;
       sqlite3_snprintf(sizeof(zBuf), zBuf, "PRAGMA,[%s,%s]",a[1],a[2]);
@@ -1261,24 +1269,22 @@ static int cevfsFileControl(sqlite3_file *pFile, int op, void *pArg){
       cevfsPragma(pFile, a[1], a[2]);
       break;
     }
-    case SQLITE_FCNTL_MMAP_SIZE: {
-      sqlite3_snprintf(sizeof(zBuf), zBuf, "SQLITE_FCNTL_MMAP_SIZE,%d", *(int*)pArg);
-      zOp = zBuf;
-      break;
-    }
     default: {
-      sqlite3_snprintf(sizeof zBuf, zBuf, "%d", op);
+#ifdef SQLITE_DEBUG
+      sqlite3_snprintf(sizeof(zBuf), zBuf, "%d", op);
       zOp = zBuf;
+#endif
       break;
     }
   }
   CEVFS_PRINTF(pInfo, "%s.xFileControl(%s,%s)", pInfo->zVfsName, p->zFName, zOp);
   rc = p->pReal->pMethods->xFileControl(p->pReal, op, pArg);
   cevfs_print_errcode(pInfo, " -> %s\n", rc);
+
   if( op==SQLITE_FCNTL_VFSNAME && rc==SQLITE_OK ){
-    *(char**)pArg = sqlite3_mprintf("cevfs.%s/%z",
-                                    pInfo->zVfsName, *(char**)pArg);
+    *(char**)pArg = sqlite3_mprintf("cevfs.%s/%z", pInfo->zVfsName, *(char**)pArg);
   }
+
   if( (op==SQLITE_FCNTL_PRAGMA || op==SQLITE_FCNTL_TEMPFILENAME)
      && rc==SQLITE_OK && *(char**)pArg ){
     CEVFS_PRINTF(pInfo, "%s.xFileControl(%s,%s) returns %s", pInfo->zVfsName, p->zFName, zOp, *(char**)pArg);
@@ -1396,16 +1402,6 @@ static int cevfsSetKey(char **pKey, const char *pExpr){
   return rc;
 }
 
-int cevfs_set_vfs_key(const char *zName, const char *pExpr){
-  if( zName && pExpr ){
-    sqlite3_vfs *pVfs = sqlite3_vfs_find(zName);
-    if( pVfs==0 ) return SQLITE_NOTFOUND;
-    cevfs_info *pInfo = (cevfs_info*)pVfs->pAppData;
-    if( pInfo ) return cevfsSetKey(&pInfo->zKey, pExpr);
-  }
-  return SQLITE_ERROR;
-}
-
 /*
 ** Open a cevfs file handle.
 */
@@ -1416,6 +1412,8 @@ static int cevfsOpen(
   int flags,
   int *pOutFlags
 ){
+  // TODO: check to make sure db is not already open.
+
   u8 nReserve;
   int rc;
 
@@ -1453,14 +1451,6 @@ static int cevfsOpen(
     // block_size
     const char *zParamBlockSize = sqlite3_uri_parameter(_zName, "block_size");
     if( zParamBlockSize ) nParamBlockSz = (u32)sqlite3Atoi(zParamBlockSize);
-    // key
-    const char *zParamKey = sqlite3_uri_parameter(_zName, "key");
-    if( zParamKey ) rc = cevfsSetKey(&p->zKey, zParamKey);
-  }
-
-  if( pInfo->zKey && !p->zKey ){
-    p->zKey = (char *)sqlite3_malloc(pInfo->key_sz);
-    memcpy(p->zKey, pInfo->zKey, pInfo->key_sz);
   }
 
   // open file
@@ -1518,6 +1508,15 @@ static int cevfsOpen(
               p->usableSize = p->pageSize - nReserve;
               sqlite3PagerSetCachesize(p->pPager, SQLITE_DEFAULT_CACHE_SIZE);
               rc = cevfsPagerLock(p);
+            }
+
+            // Call user xAutoDetect to set up VFS methods
+            if (pInfo->xAutoDetect) {
+              pInfo->xAutoDetect(pInfo->pCtx, _zName, p->zDbHeader+6, &p->nEncIvSz, &p->vfsMethods);
+              if (p->vfsMethods.xCompressBound && p->vfsMethods.xCompress && p->vfsMethods.xUncompress)
+                p->bCompressionEnabled = true;
+              if (p->vfsMethods.xEncrypt && p->vfsMethods.xDecrypt)
+                p->bEncryptionEnabled = true;
             }
           }
         }else{
@@ -1689,22 +1688,18 @@ static int cevfsGetLastError(sqlite3_vfs *pVfs, int iErr, char *zErr){
 }
 
 /*
-** Clients invoke cevfs_register to construct a new cevfs.
+** Clients invoke cevfs_create_vfs to construct a new cevfs.
 **
 ** Return SQLITE_OK on success.
 **
 ** SQLITE_NOMEM is returned in the case of a memory allocation error.
 ** SQLITE_NOTFOUND is returned if zOldVfsName does not exist.
 */
-int _cevfs_register(
-  const char *zName,
-  const char *zParent,
-  void *pCtx,
-  int (*xCompressBound)(void *, int nSrc),
-  int (*xCompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc),
-  int (*xUncompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc),
-  int makeDflt,                     // Made default VPS to use when not specified
-  int cerodActivated                // CEROD is only read-only
+int cevfs_create_vfs(
+  char const *zName,         // Name of the newly constructed VFS.
+  char const *zParent,       // Name of the underlying VFS. NULL to use default.
+  void *pCtx,                // Context pointer to be passed to CEVFS methods.
+  t_xAutoDetect xAutoDetect  // Pointer to xAutoDetect custom supplied function.
 ){
   sqlite3_vfs *pNew;
   sqlite3_vfs *pRoot;
@@ -1717,7 +1712,7 @@ int _cevfs_register(
 
   // Don't register VFS with same name more than once
   if( sqlite3_vfs_find(zName) )
-    return CEVFS_ERROR_ALREADY_REGISTERED;
+    return CEVFS_ERROR_VFS_ALREADY_EXISTS;
 
   pRoot = sqlite3_vfs_find(zParent);
   if( pRoot==0 ) return SQLITE_NOTFOUND;
@@ -1759,33 +1754,17 @@ int _cevfs_register(
       pNew->xNextSystemCall = 0;
     }
   }
-  pInfo->cerod_activated = cerodActivated;
   pInfo->pRootVfs = pRoot;
   pInfo->zVfsName = pNew->zName;
   pInfo->pCevfsVfs = pNew;
   pInfo->pCtx = pCtx;
-  pInfo->xCompressBound = xCompressBound;
-  pInfo->xCompress = xCompress;
-  pInfo->xUncompress = xUncompress;
-  pInfo->key_sz = kCCKeySizeAES256;  // 32 bytes
-  pInfo->iv_sz = kCCBlockSizeAES128; // 16 bytes
+  pInfo->xAutoDetect = xAutoDetect;
 
   CEVFS_PRINTF(pInfo, "%s.enabled_for(\"%s\")\n", pInfo->zVfsName, pRoot->zName);
-  return sqlite3_vfs_register(pNew, makeDflt);
+  return sqlite3_vfs_register(pNew, 0);
 }
 
-int cevfs_register(
-  const char *zName,                // Name of the newly constructed VFS
-  const char *zParent,              // Name of the underlying VFS
-  void *pCtx,                       // Used to pass contextual data to compression routines
-  int (*xCompressBound)(void *, int nSrc),
-  int (*xCompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc),
-  int (*xUncompress)(void *, char *aDest, int *pnDest, char *aSrc, int nSrc)
-){
-  return _cevfs_register(zName, zParent, pCtx, xCompressBound, xCompress, xUncompress, 0 ,0);
-}
-
-int cevfs_unregister(const char *zName){
+int cevfs_destroy_vfs(const char *zName){
   sqlite3_vfs *pVfs = sqlite3_vfs_find(zName);
   if( pVfs ){
     //cevfs_info *pInfo = (cevfs_info *)pVfs->pAppData;
@@ -1795,41 +1774,17 @@ int cevfs_unregister(const char *zName){
   return SQLITE_NOTFOUND;
 }
 
-int cevfsDefaultCompressBound(void *pCtx, int nByte){
-  return (int)compressBound(nByte);
-}
-
-int cevfsDefaultCompress(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc){
-  uLongf n = *pnDest;             /* In/out buffer size for compress() */
-  int rc;                         /* compress() return code */
-
-  rc = compress((Bytef*)aDest, &n, (Bytef*)aSrc, nSrc);
-  *pnDest = (int)n;
-  return (rc==Z_OK ? SQLITE_OK : SQLITE_ERROR);
-}
-
-int cevfsDefaultUncompress(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc){
-  uLongf n = *pnDest;             /* In/out buffer size for uncompress() */
-  int rc;                         /* uncompress() return code */
-
-  rc = uncompress((Bytef*)aDest, &n, (Bytef*)aSrc, nSrc);
-  *pnDest = (int)n;
-  return (rc==Z_OK ? SQLITE_OK : SQLITE_ERROR);
-}
-
-SQLITE_API void SQLITE_STDCALL sqlite3_activate_cerod(
-  const char *zPassPhrase        /* Activation phrase */
+int cevfs_build(
+  const char *srcDbPath,
+  const char *destUri,
+  void *pCtx,            // Context pointer to be passed to CEVFS methods.
+  t_xAutoDetect xAutoDetect  // Pointer to xAutoDetect custom supplied function.
 ){
-  // Activate this VPS using the builtin "PRAGMA activate_extensions('cerod-');"
-  _cevfs_register("cevfs-cerod", NULL, NULL, cevfsDefaultCompressBound, cevfsDefaultCompress, cevfsDefaultUncompress, 1 /* use as default VPS */, 1 /* ensure readonly */);
-}
-
-int cevfs_build(const char *srcDbPath, const char *destUri){
   int rc = SQLITE_ERROR;
   unsigned char zDbHeader[100];
 
   // _cevfs_register must be done early enough to avoid SQLITE_MISUSE error
-  if( (rc = _cevfs_register("cevfs-build", NULL, NULL, cevfsDefaultCompressBound, cevfsDefaultCompress, cevfsDefaultUncompress, 0, 0))==SQLITE_OK ){
+  if( (rc = cevfs_create_vfs("cevfs-build", NULL, pCtx, xAutoDetect))==SQLITE_OK ){
     sqlite3_vfs *pVfs = sqlite3_vfs_find(NULL);
     if( pVfs ){
       Pager *pPager;
