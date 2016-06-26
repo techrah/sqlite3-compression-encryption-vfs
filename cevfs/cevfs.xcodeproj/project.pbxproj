@@ -1,0 +1,287 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 46;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		9442235E1D2027C60016E082 /* cevfs-all.c in Sources */ = {isa = PBXBuildFile; fileRef = 9442235D1D2027C60016E082 /* cevfs-all.c */; };
+		944223611D20445D0016E082 /* cevfs.h in Headers */ = {isa = PBXBuildFile; fileRef = 9479F8D71C64EB4100901192 /* cevfs.h */; settings = {ATTRIBUTES = (Public, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		944223451D1F5EF20016E082 /* sqlite3-1.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = "sqlite3-1.c"; sourceTree = "<group>"; };
+		944223461D1F5EF20016E082 /* sqlite3-2.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = "sqlite3-2.c"; sourceTree = "<group>"; };
+		944223471D1F5EF20016E082 /* sqlite3-3.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = "sqlite3-3.c"; sourceTree = "<group>"; };
+		944223481D1F5EF20016E082 /* sqlite3-4.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = "sqlite3-4.c"; sourceTree = "<group>"; };
+		944223491D1F5EF20016E082 /* sqlite3-5.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = "sqlite3-5.c"; sourceTree = "<group>"; };
+		9442234A1D1F5EF20016E082 /* sqlite3-6.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = "sqlite3-6.c"; sourceTree = "<group>"; };
+		9442234B1D1F5EF20016E082 /* sqlite3-7.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = "sqlite3-7.c"; sourceTree = "<group>"; };
+		9442234C1D1F5EF20016E082 /* sqlite3-all.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = "sqlite3-all.c"; sourceTree = "<group>"; };
+		9442235D1D2027C60016E082 /* cevfs-all.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = "cevfs-all.c"; sourceTree = "<group>"; };
+		9479F8D71C64EB4100901192 /* cevfs.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = cevfs.h; sourceTree = "<group>"; };
+		9497BD111C53D9D600ADD79F /* libsqlite.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libsqlite.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		94D80F9C1C5716580091C9D9 /* cevfs.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = cevfs.c; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		9497BD0E1C53D9D600ADD79F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		944223441D1F5EF20016E082 /* sqlite */ = {
+			isa = PBXGroup;
+			children = (
+				944223451D1F5EF20016E082 /* sqlite3-1.c */,
+				944223461D1F5EF20016E082 /* sqlite3-2.c */,
+				944223471D1F5EF20016E082 /* sqlite3-3.c */,
+				944223481D1F5EF20016E082 /* sqlite3-4.c */,
+				944223491D1F5EF20016E082 /* sqlite3-5.c */,
+				9442234A1D1F5EF20016E082 /* sqlite3-6.c */,
+				9442234B1D1F5EF20016E082 /* sqlite3-7.c */,
+				9442234C1D1F5EF20016E082 /* sqlite3-all.c */,
+			);
+			path = sqlite;
+			sourceTree = "<group>";
+		};
+		9497BD081C53D9D600ADD79F = {
+			isa = PBXGroup;
+			children = (
+				9479F8D71C64EB4100901192 /* cevfs.h */,
+				94D80F9C1C5716580091C9D9 /* cevfs.c */,
+				9442235D1D2027C60016E082 /* cevfs-all.c */,
+				944223441D1F5EF20016E082 /* sqlite */,
+				9497BD121C53D9D600ADD79F /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		9497BD121C53D9D600ADD79F /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				9497BD111C53D9D600ADD79F /* libsqlite.a */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXHeadersBuildPhase section */
+		9497BD0F1C53D9D600ADD79F /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				944223611D20445D0016E082 /* cevfs.h in Headers */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
+/* Begin PBXNativeTarget section */
+		9497BD101C53D9D600ADD79F /* sqlite */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9497BD151C53D9D600ADD79F /* Build configuration list for PBXNativeTarget "sqlite" */;
+			buildPhases = (
+				9497BD0D1C53D9D600ADD79F /* Sources */,
+				9497BD0E1C53D9D600ADD79F /* Frameworks */,
+				9497BD0F1C53D9D600ADD79F /* Headers */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = sqlite;
+			productName = sqlite;
+			productReference = 9497BD111C53D9D600ADD79F /* libsqlite.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		9497BD091C53D9D600ADD79F /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 0730;
+				ORGANIZATIONNAME = "Murage Inc.";
+				TargetAttributes = {
+					9497BD101C53D9D600ADD79F = {
+						CreatedOnToolsVersion = 7.2;
+					};
+				};
+			};
+			buildConfigurationList = 9497BD0C1C53D9D600ADD79F /* Build configuration list for PBXProject "cevfs" */;
+			compatibilityVersion = "Xcode 3.2";
+			developmentRegion = English;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+			);
+			mainGroup = 9497BD081C53D9D600ADD79F;
+			productRefGroup = 9497BD121C53D9D600ADD79F /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				9497BD101C53D9D600ADD79F /* sqlite */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		9497BD0D1C53D9D600ADD79F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9442235E1D2027C60016E082 /* cevfs-all.c in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		9497BD131C53D9D600ADD79F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++0x";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "-";
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu99;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 10.11;
+				MTL_ENABLE_DEBUG_INFO = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				USER_HEADER_SEARCH_PATHS = sqlite;
+			};
+			name = Debug;
+		};
+		9497BD141C53D9D600ADD79F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++0x";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "-";
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu99;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 10.11;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = macosx;
+				USER_HEADER_SEARCH_PATHS = sqlite;
+			};
+			name = Release;
+		};
+		9497BD161C53D9D600ADD79F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				EXECUTABLE_PREFIX = lib;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"SQLITE_DEBUG=1",
+					"SQLITE_THREADSAFE=0",
+					"SQLITE_CORE=1",
+					"SQLITE_OS_UNIX=1",
+					"HAVE_READLINE=0",
+					"HAVE_EDITLINE=0",
+					"SQLITE_TEMP_STORE=1",
+					"$(inherited)",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Debug;
+		};
+		9497BD171C53D9D600ADD79F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				EXECUTABLE_PREFIX = lib;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"SQLITE_THREADSAFE=0",
+					SQLITE_CORE,
+					"SQLITE_OS_UNIX=1",
+					"HAVE_READLINE=0",
+					"HAVE_EDITLINE=0",
+					"SQLITE_TEMP_STORE=1",
+					"$(inherited)",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		9497BD0C1C53D9D600ADD79F /* Build configuration list for PBXProject "cevfs" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9497BD131C53D9D600ADD79F /* Debug */,
+				9497BD141C53D9D600ADD79F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		9497BD151C53D9D600ADD79F /* Build configuration list for PBXNativeTarget "sqlite" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9497BD161C53D9D600ADD79F /* Debug */,
+				9497BD171C53D9D600ADD79F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 9497BD091C53D9D600ADD79F /* Project object */;
+}

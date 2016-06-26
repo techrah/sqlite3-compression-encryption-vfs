@@ -20,18 +20,34 @@
 #define CEVFS_ERROR_DECRYPTION_FAILED            (CEVFS_ERROR | (8<<8))
 
 struct CevfsMethods {
-  const char *zHdr;
   void *pCtx;
-  int (*xCompressBound)(void *pCtx, int nSrc);
-  int (*xCompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc);
-  int (*xUncompress)(void *pCtx, char *aDest, int *pnDest, char *aSrc, int nSrc);
-  int (*xCompressClose)(void*);
-  int (*xEncrypt)(void *pCtx, const void *pDataIn, int nDataInSize, void *pIvOut, void **pDataOut, size_t *nDataSizeOut);
-  int (*xDecrypt)(void *pCtx, const void *pDataIn, int nDataInSize, const void *pIvIn,  void *pDataOut, size_t nDataBufferSizeOut, size_t *nDataSizeOut);
+  
+  int (*xCompressBound)(void *pCtx, size_t nDataInSize);
+  int (*xCompress)  (void *pCtx, char *aDest, size_t *pnDataOutSize, char *aSrc, size_t nDataInSize);
+  int (*xUncompress)(void *pCtx, char *aDest, size_t *pnDataOutSize, char *aSrc, size_t nDataInSize);
+  
+  int (*xEncrypt)(
+    void *pCtx,
+    const void *pDataIn,
+    size_t nDataInSize,
+    void *pIvOut,
+    void **pDataOut,
+    size_t *nDataSizeOut
+  );
+  
+  int (*xDecrypt)(
+    void *pCtx,
+    const void *pDataIn,
+    size_t nDataInSize,
+    const void *pIvIn,
+    void *pDataOut,
+    size_t nDataBufferSizeOut,
+    size_t *nDataSizeOut
+  );
 };
 typedef struct CevfsMethods CevfsMethods;
 
-typedef int (*t_xAutoDetect)(void *pCtx, const char *zFile, const char *zHdr, int *pEncIvSz, CevfsMethods*);
+typedef int (*t_xAutoDetect)(void *pCtx, const char *zFile, const char *zHdr, size_t *pEncIvSz, CevfsMethods*);
 
 int cevfs_create_vfs(
   char const *zName,     // Name of the newly constructed VFS.
