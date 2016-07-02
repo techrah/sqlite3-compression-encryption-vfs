@@ -212,7 +212,7 @@ static int cevfsLoadHeader(cevfs_file *p);
 **     /home/drh/xyzzy.txt -> xyzzy.txt
 **     xyzzy.txt           -> xyzzy.txt
 */
-static const char *fileTail(const char *z){
+const char *fileTail(const char *z){
   int i;
   if( z==0 ) return 0;
   i = (int)strlen(z)-1;
@@ -985,7 +985,9 @@ static int cevfsRead(
           if( bSuccess ){
             if( p->bCompressionEnabled ){
               bSuccess = p->vfsMethods.xUncompress(pInfo->pCtx, pUncBuf, &iDstAmt, pCmpBuf, (int)uCmpPgSz);
-              if( !bSuccess ) return CEVFS_ERROR_DECOMPRESSION_FAILED;
+              if( !bSuccess ){
+                return CEVFS_ERROR_DECOMPRESSION_FAILED;
+              }
               assert( iDstAmt==uppPgSz );
             }else{
               pUncBuf = pCmpBuf;
@@ -993,7 +995,9 @@ static int cevfsRead(
             sqlite3_free(pCmpBuf);
             u16 uBufOfst = iOfst % uppPgSz;
             memcpy(zBuf, pUncBuf+uBufOfst, iAmt);
-          } else rc = CEVFS_ERROR_DECRYPTION_FAILED;
+          }else{
+            rc = CEVFS_ERROR_DECRYPTION_FAILED;
+          }
           sqlite3_free(pUncBuf);
         }else rc = SQLITE_NOMEM;
         sqlite3PagerUnref(pPage);
@@ -1090,7 +1094,9 @@ static int cevfsWrite(
             sqlite3PagerUnref(pPage);
           }
           sqlite3_free(pIvEncBuf);
-        }else rc = CEVFS_ERROR_ENCRYPTION_FAILED;
+        }else{
+          rc = CEVFS_ERROR_ENCRYPTION_FAILED;
+        }
         sqlite3_free(pCmpBuf);
       }else rc = SQLITE_NOMEM;
     }else rc = SQLITE_READONLY;
@@ -1674,7 +1680,8 @@ int cevfs_create_vfs(
   char const *zName,         // Name of the newly constructed VFS.
   char const *zParent,       // Name of the underlying VFS. NULL to use default.
   void *pCtx,                // Context pointer to be passed to CEVFS methods.
-  t_xAutoDetect xAutoDetect  // Pointer to xAutoDetect custom supplied function.
+  t_xAutoDetect xAutoDetect, // Pointer to xAutoDetect custom supplied function.
+  int makeDefault
 ){
   sqlite3_vfs *pNew;
   sqlite3_vfs *pRoot;
@@ -1736,7 +1743,7 @@ int cevfs_create_vfs(
   pInfo->xAutoDetect = xAutoDetect;
 
   CEVFS_PRINTF(pInfo, "%s.enabled_for(\"%s\")\n", pInfo->zVfsName, pRoot->zName);
-  return sqlite3_vfs_register(pNew, 0);
+  return sqlite3_vfs_register(pNew, makeDefault);
 }
 
 int cevfs_destroy_vfs(const char *zName){
@@ -1750,26 +1757,33 @@ int cevfs_destroy_vfs(const char *zName){
 }
 
 int cevfs_build(
-  const char *srcDbPath,
-  const char *destUri,
-  void *pCtx,            // Context pointer to be passed to CEVFS methods.
-  t_xAutoDetect xAutoDetect  // Pointer to xAutoDetect custom supplied function.
+  const char *zSrcFilename,
+  const char *zDestFilename,
+  const char *vfsName,
+  void *pCtx,
+  t_xAutoDetect xAutoDetect
 ){
-  int rc = SQLITE_ERROR;
+  int rc = SQLITE_OK;
   unsigned char zDbHeader[100];
+  sqlite3_vfs *pDestVfs = NULL;
 
-  // _cevfs_register must be done early enough to avoid SQLITE_MISUSE error
-  if( (rc = cevfs_create_vfs("cevfs-build", NULL, pCtx, xAutoDetect))==SQLITE_OK ){
-    sqlite3_vfs *pVfs = sqlite3_vfs_find(NULL);
-    if( pVfs ){
+  // cevfs_create_vfs must be done early enough to avoid SQLITE_MISUSE error
+  rc = cevfs_create_vfs(vfsName, NULL, pCtx, xAutoDetect, 0);
+  if( rc==SQLITE_OK || rc==CEVFS_ERROR_VFS_ALREADY_EXISTS ){
+    pDestVfs = sqlite3_vfs_find(vfsName);
+  }
+
+  if( pDestVfs ){
+    sqlite3_vfs *pSrcVfs = sqlite3_vfs_find(NULL);
+    if( pSrcVfs ){
       Pager *pPager;
       int vfsFlags = SQLITE_OPEN_READONLY | SQLITE_OPEN_MAIN_DB | SQLITE_OPEN_URI;
-      if( (rc = sqlite3PagerOpen(pVfs, &pPager, srcDbPath, EXTRA_SIZE, 0, vfsFlags, cevfsPageReinit))==SQLITE_OK ){
+      if( (rc = sqlite3PagerOpen(pSrcVfs, &pPager, zSrcFilename, EXTRA_SIZE, 0, vfsFlags, cevfsPageReinit))==SQLITE_OK ){
         sqlite3PagerSetJournalMode(pPager, PAGER_JOURNALMODE_OFF);
         if( (rc = sqlite3PagerReadFileheader(pPager,sizeof(zDbHeader),zDbHeader)) == SQLITE_OK ){
           u32 pageSize = (zDbHeader[16]<<8) | (zDbHeader[17]<<16);
           if( pageSize>=512 && pageSize<=SQLITE_MAX_PAGE_SIZE  // validate range
-             && ((pageSize-1)&pageSize)==0 ){                   // validate page size is a power of 2
+             && ((pageSize-1)&pageSize)==0 ){                  // validate page size is a power of 2
             u8 nReserve = zDbHeader[20];
             if( (rc = sqlite3PagerSetPagesize(pPager, &pageSize, nReserve)) == SQLITE_OK ){
               u32 fileChangeCounter = sqlite3Get4byte(zDbHeader+24);
@@ -1779,7 +1793,7 @@ int cevfs_build(
               // If we didn't get page count, figure it out from the file size
               if( !(pageCount>0 && fileChangeCounter==versionValidForNumber) ){
                 struct stat st;
-                if( stat(srcDbPath, &st)==0 ){
+                if( stat(zSrcFilename, &st)==0 ){
                   off_t size = st.st_size;
                   pageCount = (u32)(size/pageSize);
                 }
@@ -1789,9 +1803,10 @@ int cevfs_build(
               if( rc==SQLITE_OK && (rc = sqlite3PagerSharedLock(pPager))==SQLITE_OK ){
                 // get destination ready to receive data
                 sqlite3 *pDb;
-                if( (rc = sqlite3_open_v2(destUri, &pDb, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE, "cevfs-build"))==SQLITE_OK ){
-                  sqlite3_vfs *pVfs = sqlite3_vfs_find("cevfs-build");
-                  cevfs_info *pInfo = (cevfs_info *)pVfs->pAppData;
+
+                if( (rc = sqlite3_open_v2(zDestFilename, &pDb, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE, vfsName))==SQLITE_OK ){
+                  cevfs_info *pInfo = (cevfs_info *)pDestVfs->pAppData;
+
                   DbPage *pPage1 = NULL;
                   // import all pages
                   for(Pgno i=0; i<pageCount; i++){

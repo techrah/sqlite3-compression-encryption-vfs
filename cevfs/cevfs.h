@@ -23,11 +23,11 @@
 
 struct CevfsMethods {
   void *pCtx;
-  
+
   int (*xCompressBound)(void *pCtx, size_t nDataInSize);
   int (*xCompress)  (void *pCtx, char *aDest, size_t *pnDataOutSize, char *aSrc, size_t nDataInSize);
   int (*xUncompress)(void *pCtx, char *aDest, size_t *pnDataOutSize, char *aSrc, size_t nDataInSize);
-  
+
   int (*xEncrypt)(
     void *pCtx,                  // in:  the context
     const void *pDataIn,         // in:  the unencrypted data
@@ -37,7 +37,7 @@ struct CevfsMethods {
     size_t *nDataSizeOut,        // out: size of encrypted data
     void *sqlite3_malloc(int n)  // in:  pointer to the sqlite3_malloc function
   );
-  
+
   int (*xDecrypt)(
     void *pCtx,
     const void *pDataIn,
@@ -56,7 +56,8 @@ int cevfs_create_vfs(
   char const *zName,     // Name of the newly constructed VFS.
   char const *zParent,   // Name of the underlying VFS. NULL to use default.
   void *pCtx,            // Context pointer to be passed to CEVFS methods.
-  t_xAutoDetect
+  t_xAutoDetect,         // xAutoDetect method to set up xMethods.
+  int makeDefault        // BOOL: Make this the default VFS? Typically false.
 );
 
 int cevfs_set_vfs_key(const char *zName, const char *pExpr);
@@ -70,6 +71,7 @@ int cevfs_destroy_vfs(const char *zName);
 int cevfs_build(
   const char *zSrcFilename,  // Source SQLite DB filename, including path. Can be a URI.
   const char *zDestFilename, // Destination SQLite DB filename, including path. Can be a URI.
+  const char *vfsName,       // This will be embedded into the header of the database file.
   void *pCtx,                // Context pointer to be passed to CEVFS xMethods.
   t_xAutoDetect              // xAutoDetect method to set up xMethods.
 );

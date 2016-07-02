@@ -260,11 +260,11 @@ int main(int argc, const char * argv[]) {
     { 0x71, 0xD8, 0x6C, 0x32, 0x99, 0xCA, 0x29, 0x2A }
   };
 
-  ctx.pKey = keyBytes;            // 32-bit encryption hex key
-  ctx.nKeySz = 32;                // key size in bytes
-  ctx.nIvSz = kCCBlockSizeAES128; // size of IV in bytes
+  ctx.pKey   = keyBytes;            // 32-bit encryption hex key
+  ctx.nKeySz = kCCKeySizeAES256;    // key size in bytes
+  ctx.nIvSz  = kCCBlockSizeAES128;  // size of IV in bytes
 
-  if( (rc = cevfs_create_vfs(VFS_NAME, NULL, &ctx, cevfsAutoDetect))==SQLITE_OK ){
+  if( (rc = cevfs_create_vfs(VFS_NAME, NULL, &ctx, cevfsAutoDetect, 0))==SQLITE_OK ){
     rc = SQLITE_OK;
 
 #if SQL_TEST_WRITE
@@ -286,6 +286,6 @@ int main(int argc, const char * argv[]) {
     fputs("Done\n", stdout);
   }
   fclose(f);
-  cevfs_destroy_vfs("cevfs");
+  cevfs_destroy_vfs(VFS_NAME);
   return 0;
 }
