@@ -5,6 +5,9 @@
       location = "group:cevfs/cevfs.xcodeproj">
    </FileRef>
    <FileRef
+      location = "group:cevfs_build/cevfs_build.xcodeproj">
+   </FileRef>
+   <FileRef
       location = "group:cevfs_example/cevfs_example.xcodeproj">
    </FileRef>
 </Workspace>
