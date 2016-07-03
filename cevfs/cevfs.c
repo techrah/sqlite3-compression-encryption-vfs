@@ -1049,7 +1049,8 @@ static int cevfsWrite(
             nDest,         // data-in length
             iv,            // IV out
             &pEncBuf,      // dataOut; result is written here.
-            &tmp_csz       // On successful return, the number of bytes written to dataOut.
+            &tmp_csz,      // On successful return, the number of bytes written to dataOut.
+            sqlite3_malloc
           );
         }
 

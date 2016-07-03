@@ -9,6 +9,8 @@
 #ifndef cevfs_h
 #define cevfs_h
 
+#define CEVFS_OK                                 0
+
 #define CEVFS_ERROR                              111
 #define CEVFS_ERROR_PAGE_SIZE_TOO_SMALL          (CEVFS_ERROR | (1<<8))
 #define CEVFS_ERROR_MALFORMED_KEY                (CEVFS_ERROR | (2<<8))
@@ -27,12 +29,13 @@ struct CevfsMethods {
   int (*xUncompress)(void *pCtx, char *aDest, size_t *pnDataOutSize, char *aSrc, size_t nDataInSize);
   
   int (*xEncrypt)(
-    void *pCtx,
-    const void *pDataIn,
-    size_t nDataInSize,
-    void *pIvOut,
-    void **pDataOut,
-    size_t *nDataSizeOut
+    void *pCtx,                  // in:  the context
+    const void *pDataIn,         // in:  the unencrypted data
+    size_t nDataInSize,          // in:  the size of the unencrypted data
+    void *pIvOut,                // out: the randomly created IV
+    void **pDataOut,             // out: the encrypted data
+    size_t *nDataSizeOut,        // out: size of encrypted data
+    void *sqlite3_malloc(int n)  // in:  pointer to the sqlite3_malloc function
   );
   
   int (*xDecrypt)(
@@ -65,10 +68,10 @@ int cevfs_destroy_vfs(const char *zName);
  \param destUri URI of non-existing destination database file with optional parameters (block_size, key)
  */
 int cevfs_build(
-  const char *srcDbPath,
-  const char *destUri,
-  void *pCtx,            // Context pointer to be passed to CEVFS methods.
-  t_xAutoDetect
+  const char *zSrcFilename,  // Source SQLite DB filename, including path. Can be a URI.
+  const char *zDestFilename, // Destination SQLite DB filename, including path. Can be a URI.
+  void *pCtx,                // Context pointer to be passed to CEVFS xMethods.
+  t_xAutoDetect              // xAutoDetect method to set up xMethods.
 );
 
 #endif /* cevfs_h */
