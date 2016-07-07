@@ -108,7 +108,7 @@ If you are using CEVFS, chances are that you are _not_ currently making use of t
 1. Does not work yet with SQLite version 3.13.0.
 
 ## Contributing to the project
-If you would like to contribute back to the project, please fork the repo and submit pull requests.
+If you would like to contribute back to the project, please fork the repo and submit pull requests. For more information, please read this [wiki page](https://github.com/ryanhomer/sqlite3-compression-encryption-vfs/wiki/Developing-in-Xcode)
 
 Here are some things that need to be implemented:
 - Proper mutex & multi-threading support
