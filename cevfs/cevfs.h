@@ -1,13 +1,32 @@
-//
-//  cevfs.h
-//  sqlite
-//
-//  Created by Ryan Homer on 5/2/2016.
-//  Copyright © 2016 Murage Inc. All rights reserved.
-//
+/**
+CEVFS
+Compression & Encryption VFS
 
-#ifndef cevfs_h
-#define cevfs_h
+Copyright (c) 2016 Ryan Homer, Murage Inc.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
+#ifndef __CEVFS_H__
+#define __CEVFS_H__
 
 #define CEVFS_OK                                 0
 
@@ -50,7 +69,12 @@ struct CevfsMethods {
 };
 typedef struct CevfsMethods CevfsMethods;
 
-typedef int (*t_xAutoDetect)(void *pCtx, const char *zFile, const char *zHdr, size_t *pEncIvSz, CevfsMethods*);
+typedef int (*t_xAutoDetect)(
+  void *pCtx,            // Pointer to context passed in via 3rd param of cevfs_create_vfs.
+  const char *zFile,     // Pointer to buffer containing the database filename.
+  const char *zHdr,      // NULL if new database, otherwise database header after CEVFS- prefix.
+  size_t *pEncIvSz,      // Pointer to encryption initialization vector (IV) size.
+  CevfsMethods*);        // Pointer to compression/encryption methods.
 
 int cevfs_create_vfs(
   char const *zName,     // Name of the newly constructed VFS.
@@ -60,7 +84,6 @@ int cevfs_create_vfs(
   int makeDefault        // BOOL: Make this the default VFS? Typically false.
 );
 
-int cevfs_set_vfs_key(const char *zName, const char *pExpr);
 int cevfs_destroy_vfs(const char *zName);
 
 /*!
@@ -76,4 +99,4 @@ int cevfs_build(
   t_xAutoDetect              // xAutoDetect method to set up xMethods.
 );
 
-#endif /* cevfs_h */
+#endif /* __CEVFS_H__ */
