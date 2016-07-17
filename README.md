@@ -68,13 +68,14 @@ parameters:
 ### Creating a Custom Version of SQLite
 It is helpful to have a custom command-line version of `sqlite3` on your development workstation for opening/testing your newly created databases.
 
-Again, modify your _xFunctions_ to accommodate your operating system. You may also need to install the Readline lib.
-
 Copy the following files to your temporary `build` directory.
 - sqlite3.c (from SQLite source)
 - shell.c (from SQLite source)
 - cevfs/cevfs.c
 - cevfs_build/cevfs_mod.c
+- cevfs_build/xMethods.c
+
+Again, modify your _xFunctions_ to accommodate your operating system. You may also need to install the Readline lib.
 
 Build:
 ```
@@ -87,7 +88,7 @@ Then, to open a CEVFS database:
 ```
 $ ./sqlite3
 sqlite> PRAGMA activate_extensions("cerod-x'<your hex key goes here>'");
-sqlite> .open path/to/your/cerod/db
+sqlite> .open path/to/your/cevfs/db
 ```
 
 By specifying `SQLITE_ENABLE_CEROD` we can make use of an API hook that's built into SQLite for the CEROD extension that will allow you to conveniently activate CEVFS. It has the following signature:
