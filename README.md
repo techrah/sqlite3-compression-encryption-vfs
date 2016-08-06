@@ -56,14 +56,19 @@ build> $ clang cevfs-all.c cevfs_build.c -O2 -o cevfs_build -lz
 
 Then to create a CEVFS database:
 ```
-./cevfs_build UNCOMPRESSED COMPRESSED KEY VFS_NAME
+./cevfs_build UNCOMPRESSED COMPRESSED VFS_NAME KEY
 ```
 
 parameters:
 - **UNCOMPRESSED**: path to uncompressed database
 - **COMPRESSED**: path to new compressed database
-- **KEY**: encryption key
 - **VFS_NAME**: name to embed in header (10 chars. max.)
+- **KEY**: encryption key
+
+E.g.:
+```
+./cevfs_build myDatabase.db myNewDatabase.db default "x'2F3A995FCE317EA2...'"
+```
 
 ### Creating a Custom Version of SQLite
 It is helpful to have a custom command-line version of `sqlite3` on your development workstation for opening/testing your newly created databases.

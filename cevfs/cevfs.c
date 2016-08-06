@@ -1770,14 +1770,18 @@ int cevfs_create_vfs(
   return sqlite3_vfs_register(pNew, makeDefault);
 }
 
+static int _cevfs_destroy_vfs(sqlite3_vfs *pVfs) {
+  sqlite3_free(pVfs);
+  return SQLITE_OK;
+}
+
 int cevfs_destroy_vfs(const char *zName){
   sqlite3_vfs *pVfs = sqlite3_vfs_find(zName);
   if( pVfs ){
     //cevfs_info *pInfo = (cevfs_info *)pVfs->pAppData;
-    sqlite3_free(pVfs);
-    return SQLITE_OK;
+    return _cevfs_destroy_vfs(pVfs);
   }
-  return SQLITE_NOTFOUND;
+  return CEVFS_ERROR_VFS_DOES_NOT_EXIST;
 }
 
 int cevfs_build(
@@ -1858,12 +1862,11 @@ int cevfs_build(
                 }
               }
             }
-          }
-        }else{
-          rc = SQLITE_CORRUPT;
+          } else rc = SQLITE_CORRUPT;
         }
       }
-    }
+    } else rc = SQLITE_INTERNAL;
+    _cevfs_destroy_vfs(pDestVfs);
   }
   return rc;
 }
