@@ -970,7 +970,7 @@ static int cevfsRead(
         assert( uCmpPgSz > 0 );
         size_t iDstAmt = uppPgSz;
         void *pUncBuf = sqlite3_malloc((int)iDstAmt);
-        void *pCmpBuf = sqlite3_malloc(uCmpPgSz);
+        void *pCmpBuf = NULL;
         int bSuccess = 0;
 
         if( pUncBuf ){
@@ -983,6 +983,7 @@ static int cevfsRead(
 
           // decrypt
           if( p->bEncryptionEnabled ){
+            pCmpBuf = sqlite3_malloc(uCmpPgSz);
             void *srcData = iv+p->nEncIvSz;
             size_t nDataInSize = uCmpPgSz-p->nEncIvSz;
             size_t nFinalSz;
@@ -1016,7 +1017,7 @@ static int cevfsRead(
             }else{
               pUncBuf = pCmpBuf;
             }
-            sqlite3_free(pCmpBuf);
+            if( p->bEncryptionEnabled ) sqlite3_free(pCmpBuf);
             u16 uBufOfst = iOfst % uppPgSz;
             memcpy(zBuf, pUncBuf+uBufOfst, iAmt);
           }else{
@@ -1068,9 +1069,10 @@ static int cevfsWrite(
         void *pEncBuf = NULL;
         size_t tmp_csz = 0;
         int bSuccess = 0;
+        void *iv = NULL;
 
-        void *iv = sqlite3_malloc((int)p->nEncIvSz);
         if( p->bEncryptionEnabled ){
+          iv = sqlite3_malloc((int)p->nEncIvSz);
           bSuccess = p->vfsMethods.xEncrypt(
             pInfo->pCtx,
             pCmpBuf,       // dataIn
@@ -1080,14 +1082,27 @@ static int cevfsWrite(
             &tmp_csz,      // On successful return, the number of bytes written to dataOut.
             sqlite3_malloc
           );
+          sqlite3_free(pCmpBuf);
+        }else{
+          bSuccess = true;
+          pEncBuf = pCmpBuf;
         }
 
         if( bSuccess && pEncBuf ){
           // Join IV and pEncBuf. If IV is greater than pInfo->nEncIvSz, it will be truncated.
-          void *pIvEncBuf = sqlite3_realloc(iv, (int)(p->nEncIvSz+tmp_csz));
-          memcpy(pIvEncBuf+p->nEncIvSz, pEncBuf, tmp_csz);
+          void *pIvEncBuf = NULL;
+          CevfsCmpSize uIvEncSz;
 
-          CevfsCmpSize uIvEncSz = tmp_csz + p->nEncIvSz;
+          if( p->bEncryptionEnabled ){
+            uIvEncSz = p->nEncIvSz+tmp_csz;
+            pIvEncBuf = sqlite3_realloc(iv, (int)(uIvEncSz));
+            memcpy(pIvEncBuf+p->nEncIvSz, pEncBuf, tmp_csz);
+            sqlite3_free(pEncBuf);
+          }else{
+            uIvEncSz = nDest;
+            pIvEncBuf = pCmpBuf;
+          }
+
           cevfsPageMapSet(p, iOfst, uIvEncSz, &uppPgno, &mappedPgno, &cmprPgOfst);
 
           // write
@@ -1121,7 +1136,6 @@ static int cevfsWrite(
         }else{
           rc = CEVFS_ERROR_ENCRYPTION_FAILED;
         }
-        sqlite3_free(pCmpBuf);
       }else rc = SQLITE_NOMEM;
     }else rc = SQLITE_READONLY;
   }else{
