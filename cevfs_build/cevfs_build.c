@@ -88,7 +88,7 @@ static void *hexToBlob(const char *z, int n){
 struct context ctx;
 
 int main(int argc, const char * argv[]) {
-  if( argc != 5 ){
+  if( argc != 4 && argc != 5 ){
     printf("Usage: %s UNCOMPRESSED COMPRESSED KEY\n", fileTail(argv[0]));
     printf("  UNCOMPRESSED: URI of uncompressed SQLite DB file.\n");
     printf("  COMPRESSED:   URI of new compressed DB with optional ?block_size=<block_size>\n");
@@ -102,12 +102,14 @@ int main(int argc, const char * argv[]) {
   // Convert encryption key string to hex blob.
   // This assumes that the key is in the form of x'<hex-string>'
   // You should, of course, implement proper error checking.
-  const char *key = argv[4]+2;
-  char *keyBytes = hexToBlob(key, (int)strlen(key)-1);
+  if( argc == 5 ){
+    const char *key = argv[4]+2;
+    char *keyBytes = hexToBlob(key, (int)strlen(key)-1);
 
-  ctx.pKey   = keyBytes;           // 32-bit encryption hex key
-  ctx.nKeySz = kCCKeySizeAES256;   // key size in bytes
-  ctx.nIvSz  = kCCBlockSizeAES128; // size of IV in bytes
+    ctx.pKey   = keyBytes;           // 32-bit encryption hex key
+    ctx.nKeySz = kCCKeySizeAES256;   // key size in bytes
+    ctx.nIvSz  = kCCBlockSizeAES128; // size of IV in bytes
+  }
 
   // You can use the VFS name to determine how you set up your xMethods,
   // so we pass the VFS name as a command line parameter as well.
