@@ -89,8 +89,8 @@ int cevfs_destroy_vfs(const char *zName);
 
 /*!
  \brief Create new compresses/encrypted database from existing database.
- \param srcDbPath Standard path to existing uncompressed, unencrypted SQLite database file.
- \param destUri URI of non-existing destination database file with optional parameters (block_size, key)
+ \param zSrcFilename Standard path to existing uncompressed, unencrypted SQLite database file.
+ \param zDestFilename URI of non-existing destination database file with optional parameters (block_size, key)
  */
 int cevfs_build(
   const char *zSrcFilename,  // Source SQLite DB filename, including path. Can be a URI.
