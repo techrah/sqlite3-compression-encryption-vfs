@@ -40,15 +40,19 @@ SOFTWARE.
 #include <CommonCrypto/CommonDigest.h>
 #include <CommonCrypto/CommonCryptor.h>
 
-// Size of standard Sqlite3 pager header
-#define CEVFS_DB_HEADER1_SZ        100
-// Size of cevfs-specific pager header
-#define CEVFS_DB_HEADER2_SZ        100
+// Standard Sqlite3 pager header
 #define CEVFS_DB_HEADER1_OFST      000
+#define CEVFS_DB_HEADER1_SZ        100
+
+// cevfs-specific pager header
 #define CEVFS_DB_HEADER2_OFST      CEVFS_DB_HEADER1_OFST+CEVFS_DB_HEADER1_SZ
-// Offset to master map table
-#define CEVFS_DB_MMTBL_OFST        CEVFS_DB_HEADER2_OFST+CEVFS_DB_HEADER2_SZ
+#define CEVFS_DB_HEADER2_SZ        100
+
+// Total header size
 #define CEVFS_DB_HEADER_SIZE       (CEVFS_DB_HEADER1_SZ + CEVFS_DB_HEADER2_SZ)
+
+// Offset to master map table, starts just after header
+#define CEVFS_DB_MMTBL_OFST        CEVFS_DB_HEADER2_OFST+CEVFS_DB_HEADER2_SZ
 
 #define CEVFS_FILE_SCHEMA_NO         1
 #define CEVFS_FIRST_MAPPED_PAGE      3
@@ -266,7 +270,6 @@ static char * cevfsMapPath(cevfs_file *pFile, const char *zName, bool *bMustRele
   static const char *zTail = "btree";
   if (bMustRelease) *bMustRelease = false;
   if( strstr(zName, "-journal")==0 ){
-    bMustRelease = false;
     return (char *)zName;
   }
   char *zUppJournalPath = pFile ? pFile->zUppJournalPath : NULL;
@@ -614,7 +617,7 @@ static int cevfsLoadHeader(cevfs_file *p){
 
 static CevfsMemPage *memPageFromDbPage(DbPage *pDbPage, Pgno mappedPgno){
   CevfsMemPage* pPg = (CevfsMemPage *)sqlite3PagerGetExtra(pDbPage);
-  if(mappedPgno != pPg->pgno  ){
+  if( mappedPgno != pPg->pgno  ){
     pPg->pgno = mappedPgno;
     pPg->pDbPage = pDbPage;
     pPg->dbHdrOffset = mappedPgno==1 ? CEVFS_DB_HEADER_SIZE : 0;
@@ -749,7 +752,7 @@ void cevfsAllocCmpPageSpace(
   //u32 realPageSize = pFile->pageSize - (header->currPgno == 1 ? CEVFS_DB_HEADER_SIZE : 0);
   header->currPageOfst += cmpSz;
   if( header->currPageOfst > /*realPageSize*/ pFile->pageSize ){
-    // current page can't hold anymore, start new page.
+    // current page can't hold any more, start new page.
     ofst = 0;
     header->currPageOfst = cmpSz;
     // Make sure to not use a pgno that we allocated to a pagemap page.
@@ -841,7 +844,7 @@ static int cevfsPageMapSet(
 
   if( (rc = cevfsPageMapGet(pFile, uppOfst, outUppPgno, outLwrPgno, outCmpOfst, &oldCmpSz, &ix))==SQLITE_OK ){
     /*
-    ** We found a map entry. It's either a placeholder entry that need valid data,
+    ** We found a map entry. It's either a placeholder entry that needs valid data,
     ** an outdated entry that needs updating, or a valid up-to-date entry.
     ** If the entry needs updating, we will reuse the space used to hold the previously compressed
     ** data if the compressed data now takes up less space or allocate a new space at the end of
@@ -960,29 +963,40 @@ static int cevfsRead(
     Pgno uppPgno, mappedPgno;
     CevfsCmpOfst cmprPgOfst;
     CevfsCmpSize uCmpPgSz;
+
     if( (rc = cevfsPageMapGet(p, iOfst, &uppPgno, &mappedPgno, &cmprPgOfst, &uCmpPgSz, NULL)) == SQLITE_OK ){
-      if( rc==SQLITE_OK &&  (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0)) == SQLITE_OK ){
+      if( rc==SQLITE_OK &&
+         (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0))==SQLITE_OK
+      ){
+        void *pDecBuf = NULL;
+        void *pUncBuf = NULL;
+        void *pDstData = NULL;
+
         CevfsMemPage *pMemPage = memPageFromDbPage(pPage, mappedPgno);
         CEVFS_PRINTF(
           pInfo, "%s.xRead(%s,pgno=%u->%u,ofst=%08lld->%u,amt=%d->%u)",
           pInfo->zVfsName, p->zFName, uppPgno, mappedPgno, iOfst, cmprPgOfst, iAmt, uCmpPgSz
         );
         assert( uCmpPgSz > 0 );
+
         size_t iDstAmt = uppPgSz;
-        void *pUncBuf = sqlite3_malloc((int)iDstAmt);
-        void *pCmpBuf = sqlite3_malloc(uCmpPgSz);
-        int bSuccess = 0;
+        int bSuccess = 1;
 
-        if( pUncBuf ){
-          // If using encryption, the IV is stored first followed by the enctypted data
-          void *iv =
-            (char *)pMemPage->aData
-            +pMemPage->dbHdrOffset
-            +pMemPage->pgHdrOffset
-            +cmprPgOfst;
+        void *pSrcData =
+          (char *)pMemPage->aData
+          +pMemPage->dbHdrOffset
+          +pMemPage->pgHdrOffset
+          +cmprPgOfst;
 
-          // decrypt
-          if( p->bEncryptionEnabled ){
+        // src = dst, assuming no encryption or compression
+        pDstData = pSrcData;
+
+        if( p->bEncryptionEnabled ){
+          // The IV is stored first followed by the enctypted data
+          void *iv = pSrcData;
+
+          pDecBuf = sqlite3_malloc(uCmpPgSz);
+          if( pDecBuf ){
             void *srcData = iv+p->nEncIvSz;
             size_t nDataInSize = uCmpPgSz-p->nEncIvSz;
             size_t nFinalSz;
@@ -992,38 +1006,36 @@ static int cevfsRead(
               srcData,                  // dataIn
               nDataInSize,              // data-in length
               iv,                       // IvIn
-              pCmpBuf,                  // dataOut; result is written here.
+              pDecBuf,                  // dataOut; result is written here.
               uCmpPgSz,                 // The size of the dataOut buffer in bytes
               &nFinalSz                 // On successful return, the number of bytes written to dataOut.
             );
 
             if( bSuccess ){
               uCmpPgSz = nFinalSz;
-            }
-          }else{
-            bSuccess = true;
-            pCmpBuf = iv;
-          }
+              pSrcData = pDstData = pDecBuf;
+            }else rc=CEVFS_ERROR_DECRYPTION_FAILED;
+          }else rc=SQLITE_NOMEM;
+        } // encryption
 
-          // uncompress
-          if( bSuccess ){
-            if( p->bCompressionEnabled ){
-              bSuccess = p->vfsMethods.xUncompress(pInfo->pCtx, pUncBuf, &iDstAmt, pCmpBuf, (int)uCmpPgSz);
-              if( !bSuccess ){
-                return CEVFS_ERROR_DECOMPRESSION_FAILED;
-              }
+        if( p->bCompressionEnabled && bSuccess && bSuccess && rc==SQLITE_OK ){
+          pUncBuf = sqlite3_malloc((int)iDstAmt);
+          if( pUncBuf ){
+            bSuccess = p->vfsMethods.xUncompress(pInfo->pCtx, pUncBuf, &iDstAmt, pSrcData, (int)uCmpPgSz);
+            if( bSuccess ){
               assert( iDstAmt==uppPgSz );
-            }else{
-              pUncBuf = pCmpBuf;
-            }
-            sqlite3_free(pCmpBuf);
-            u16 uBufOfst = iOfst % uppPgSz;
-            memcpy(zBuf, pUncBuf+uBufOfst, iAmt);
-          }else{
-            rc = CEVFS_ERROR_DECRYPTION_FAILED;
-          }
-          sqlite3_free(pUncBuf);
-        }else rc = SQLITE_NOMEM;
+              pDstData = pUncBuf;
+            }else rc=CEVFS_ERROR_DECOMPRESSION_FAILED;
+          }else rc=SQLITE_NOMEM;
+        }
+
+        if( bSuccess && rc==SQLITE_OK ){
+          u16 uBufOfst = iOfst % uppPgSz;
+          memcpy(zBuf, pDstData+uBufOfst, iAmt);
+        }
+
+        if( pDecBuf ) sqlite3_free( pDecBuf );
+        if( pUncBuf ) sqlite3_free( pUncBuf );
         sqlite3PagerUnref(pPage);
       }
     }else{
@@ -1050,65 +1062,84 @@ static int cevfsWrite(
 ){
   cevfs_file *p = (cevfs_file *)pFile;
   cevfs_info *pInfo = p->pInfo;
-  int rc;
+  int rc = SQLITE_OK;
 
   if( p->pPager ){
-    DbPage *pPage;
-    Pgno uppPgno, mappedPgno;
+    if( p->bReadOnly ) rc = SQLITE_READONLY;
+    else{
+      void *pCmpBuf = NULL;
+      void *pEncBuf = NULL;
+      void *pSrcData = (void *)zBuf;
+      size_t nSrcAmt = iAmt;
+      int bSuccess = 1;
 
-    if( !p->bReadOnly ){
-      // compress
-      size_t nDest = p->vfsMethods.xCompressBound(pInfo->pCtx, iAmt);
-      void *pCmpBuf = sqlite3_malloc((int)nDest);
-      if( pCmpBuf ){
-        CevfsCmpOfst cmprPgOfst;
-        p->vfsMethods.xCompress(pInfo->pCtx, pCmpBuf, &nDest, (void *)zBuf, iAmt);
+      if( p->bCompressionEnabled ){
+        size_t nDest = p->vfsMethods.xCompressBound(pInfo->pCtx, nSrcAmt);
+        pCmpBuf = sqlite3_malloc((int)nDest);
+        if( pCmpBuf ){
+          bSuccess = p->vfsMethods.xCompress(pInfo->pCtx, pCmpBuf, &nDest, pSrcData, nSrcAmt);
+          if( bSuccess ){
+            pSrcData = pCmpBuf;
+            nSrcAmt = nDest;
+          }
+        }else rc=SQLITE_NOMEM;
+      }
 
-        // encrypt
-        void *pEncBuf = NULL;
+      if( p->bEncryptionEnabled && bSuccess ){
         size_t tmp_csz = 0;
-        int bSuccess = 0;
-
         void *iv = sqlite3_malloc((int)p->nEncIvSz);
-        if( p->bEncryptionEnabled ){
+        if( iv ){
           bSuccess = p->vfsMethods.xEncrypt(
             pInfo->pCtx,
-            pCmpBuf,       // dataIn
-            nDest,         // data-in length
+            pSrcData,      // dataIn
+            nSrcAmt,       // data-in length
             iv,            // IV out
             &pEncBuf,      // dataOut; result is written here.
             &tmp_csz,      // On successful return, the number of bytes written to dataOut.
             sqlite3_malloc
           );
-        }
+          if( bSuccess && pEncBuf ){
+            // Join IV and pEncBuf. If IV is greater than pInfo->nEncIvSz, it will be truncated.
+            void *pIvEncBuf = NULL;
+            CevfsCmpSize uIvEncSz = p->nEncIvSz+tmp_csz;
+            pIvEncBuf = sqlite3_realloc(iv, (int)(uIvEncSz));
+            memcpy(pIvEncBuf+p->nEncIvSz, pEncBuf, tmp_csz);
+            sqlite3_free(pEncBuf);
+            pSrcData = pEncBuf = pIvEncBuf;
+            nSrcAmt = uIvEncSz;
+          }else rc=CEVFS_ERROR_ENCRYPTION_FAILED;
+        }else rc=SQLITE_NOMEM;
+      }
 
-        if( bSuccess && pEncBuf ){
-          // Join IV and pEncBuf. If IV is greater than pInfo->nEncIvSz, it will be truncated.
-          void *pIvEncBuf = sqlite3_realloc(iv, (int)(p->nEncIvSz+tmp_csz));
-          memcpy(pIvEncBuf+p->nEncIvSz, pEncBuf, tmp_csz);
+      // Make sure dest/lwr page size is large enough for incoming page of data
+      assert( nSrcAmt <= p->pageSize );
+      if( rc==SQLITE_OK ){
+        if( nSrcAmt <= p->pageSize ){
+          DbPage *pPage;
+          Pgno uppPgno, mappedPgno;
+          CevfsCmpOfst cmprPgOfst;
 
-          CevfsCmpSize uIvEncSz = tmp_csz + p->nEncIvSz;
-          cevfsPageMapSet(p, iOfst, uIvEncSz, &uppPgno, &mappedPgno, &cmprPgOfst);
+          cevfsPageMapSet(p, iOfst, nSrcAmt, &uppPgno, &mappedPgno, &cmprPgOfst);
 
           // write
           if( (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0))==SQLITE_OK ){
             CevfsMemPage *pMemPage = memPageFromDbPage(pPage, mappedPgno);
-            if( (rc = cevfsPagerWrite(p, pPage))==SQLITE_OK ){
+            if( rc==SQLITE_OK && (rc = cevfsPagerWrite(p, pPage))==SQLITE_OK ){
               CEVFS_PRINTF(
                 pInfo,
                 "%s.xWrite(%s, pgno=%u->%u, offset=%08lld->%06lu, amt=%06d->%06d)",
                 pInfo->zVfsName, p->zFName,
                 uppPgno, mappedPgno,
                 iOfst, (unsigned long)(pMemPage->dbHdrOffset+pMemPage->pgHdrOffset+cmprPgOfst),
-                iAmt, uIvEncSz
+                iAmt, nSrcAmt
               );
               memcpy(
                 pMemPage->aData
                 +pMemPage->dbHdrOffset
                 +pMemPage->pgHdrOffset
                 +cmprPgOfst,
-                pIvEncBuf,
-                uIvEncSz
+                pSrcData,
+                nSrcAmt
               );
 
               // Keep track of sizes of upper and lower pagers
@@ -1117,13 +1148,12 @@ static int cevfsWrite(
             }
             sqlite3PagerUnref(pPage);
           }
-          sqlite3_free(pIvEncBuf);
-        }else{
-          rc = CEVFS_ERROR_ENCRYPTION_FAILED;
-        }
-        sqlite3_free(pCmpBuf);
-      }else rc = SQLITE_NOMEM;
-    }else rc = SQLITE_READONLY;
+        }else rc=CEVFS_ERROR_PAGE_SIZE_TOO_SMALL;
+      }
+
+      if( pEncBuf ) sqlite3_free( pEncBuf );
+      if( pCmpBuf ) sqlite3_free( pCmpBuf );
+    }
   }else{
     CEVFS_PRINTF(pInfo, "%s.xWrite(%s, offset=%08lld, amt=%06d)", pInfo->zVfsName, p->zFName, iOfst, iAmt);
     rc = p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
@@ -1837,15 +1867,16 @@ int cevfs_build(
 
                   DbPage *pPage1 = NULL;
                   // import all pages
-                  for(Pgno i=0; i<pageCount; i++){
+                  for(Pgno pgno=0; pgno<pageCount; pgno++){
                     // read source page
                     DbPage *pPage;
-                    rc = sqlite3PagerGet(pPager, i+1, &pPage, 0);
+                    rc = sqlite3PagerGet(pPager, pgno+1, &pPage, /* flags */ 0);
                     if( rc==SQLITE_OK ){
-                      // write destination page
+                      // read source page
                       void *pData = sqlite3PagerGetData(pPage);
-                      rc = cevfsWrite((sqlite3_file *)pInfo->pFile, pData, pageSize, pageSize*i);
-                      if (i==0) {
+                      // write destination page
+                      rc = cevfsWrite((sqlite3_file *)pInfo->pFile, pData, pageSize, pageSize*pgno);
+                      if( pgno==0 ){
                         // To be deallocated later
                         pPage1 = pPage;
                       }else{

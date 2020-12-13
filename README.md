@@ -35,9 +35,9 @@ _For easy reference, it will be assumed that the SQLite source code is in the `s
 
 #### Build a Static Library
 1. Create a temporary `build` directory and `cd` to it.
-1. Copy `sqlite3.c` and `cevfs.c` to the `build` directory.
+1. Copy `sqlite3.c`, `cevfs.c` and `cevfs.h` to the `build` directory.
 1. Combine the files: `cat sqlite3.c cevfs.c > cevfs-all.c`
-1. Compile: `clang -c cevfs-all.c -o sqlite3.o -oS`
+1. Compile: `clang -c cevfs-all.c -o sqlite3.o -Os`
 1. Create static lib: `libtool -static sqlite3.o -o sqlite3.a`
 
 ### Creating a Command-Line Build Tool
@@ -46,7 +46,8 @@ If you are using macOS, you can use the `cevfs_build` example which implements c
 Copy the following files to your temporary build directory:
 - sqlite/sqlite3.c
 - cevfs/cevfs.c
-- cevfs_build/cevfs_build.c
+- cevfs\_build/cevfs\_build.c
+- cevfs_build/xMethods.c
 
 Build:
 ```
@@ -66,8 +67,17 @@ parameters:
 - **KEY**: encryption key
 
 E.g.:
+
 ```
-./cevfs_build myDatabase.db myNewDatabase.db default "x'2F3A995FCE317EA2...'"
+./cevfs_build myDatabase.db myNewDatabase.db default "x'2F3A995FCE317EA22F3A995FCE317EA22F3A995FCE317EA22F3A995FCE317EA2'"
+```
+
+(hex key is 32 pairs of 2-digit hex values)
+
+You can also try different block sizes and compare the sizes of the new databases to see which one uses less space. To specify the block size, specify the destination path using a URI and append `?block_size=<block size>`:
+
+```
+./cevfs_build myDatabase.db "file:///absolute/path/to/myNewDatabase.db?block_size=4096" default "x'2F3A995FCE317EA2...'"
 ```
 
 ### Creating a Custom Version of SQLite
@@ -87,6 +97,8 @@ Build:
 build> $ cat sqlite3.c cevfs.c cevfs_mod.c > cevfs-all.c
 build> $ clang cevfs-all.c shell.c -DSQLITE_ENABLE_CEROD=1 -DHAVE_READLINE=1 -O2 -o sqlite3 -lz -lreadline
 ```
+
+_If you get errors related to implicit declaration of functions under C99, you can add `-Wno-implicit-function-declaration` to disable them._
 
 Then, to open a CEVFS database:
 
