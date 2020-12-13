@@ -146,6 +146,7 @@ struct cevfs_info {
   void *pCtx;
   t_xAutoDetect xAutoDetect;
 
+  u32 upperPgSize;                     // Temp storage for upperPgSize
 };
 
 /*
@@ -1469,7 +1470,9 @@ static int cevfsOpen(
   p->pReal = (sqlite3_file *)&p[1];
   p->cevfsHeader.schema = CEVFS_FILE_SCHEMA_NO;
   p->cevfsHeader.currPgno = CEVFS_FIRST_MAPPED_PAGE;
-  p->cevfsHeader.uppPgSz = SQLITE_DEFAULT_PAGE_SIZE;
+
+  // Set upper page size from temp storage else use default
+  p->cevfsHeader.uppPgSz = pInfo->upperPgSize ? pInfo->upperPgSize : SQLITE_DEFAULT_PAGE_SIZE;
 
   // We need this for import
   pInfo->pFile = p;
@@ -1862,9 +1865,12 @@ int cevfs_build(
                 // get destination ready to receive data
                 sqlite3 *pDb;
 
-                if( (rc = sqlite3_open_v2(zDestFilename, &pDb, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE, vfsName))==SQLITE_OK ){
-                  cevfs_info *pInfo = (cevfs_info *)pDestVfs->pAppData;
+                // Must set upper page size before sqlite3_open_v2
+                // as cevfsOpen will be invoked and expecting this value.
+                cevfs_info *pInfo = (cevfs_info *)pDestVfs->pAppData;
+                pInfo->upperPgSize = pageSize;
 
+                if( (rc = sqlite3_open_v2(zDestFilename, &pDb, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE, vfsName))==SQLITE_OK ){
                   DbPage *pPage1 = NULL;
                   // import all pages
                   for(Pgno pgno=0; pgno<pageCount; pgno++){
