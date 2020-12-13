@@ -80,15 +80,11 @@ static void *hexToBlob(const char *z, int n){
 }
 
 void sqlite3_activate_cerod(const char *key) {
-  // TODO: Better check than this for key
-  if (strlen(key) != 2){
-    // printf("key=%s\n", key);
-    char *pKeyBytes = hexToBlob(key+2, strlen(key+2)-1);
+  char *pKeyBytes = hexToBlob(key+2, strlen(key+2)-1);
 
-    ctx.pKey   = pKeyBytes;          // 32-bit encryption hex key
-    ctx.nKeySz = kCCKeySizeAES256;   // key size in bytes
-    ctx.nIvSz  = kCCBlockSizeAES128; // size of IV in bytes
-  }
+  ctx.pKey   = pKeyBytes;          // 32-bit encryption hex key
+  ctx.nKeySz = kCCKeySizeAES256;   // key size in bytes
+  ctx.nIvSz  = kCCBlockSizeAES128; // size of IV in bytes
 
   cevfs_create_vfs("cevfs-cerod", NULL, &ctx, cevfsAutoDetect, 1);
 }

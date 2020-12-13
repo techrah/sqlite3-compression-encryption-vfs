@@ -105,11 +105,11 @@ int cevfsDecrypt(void *pDecryptCtx, const void *pDataIn, size_t nDataInSize, con
 }
 
 int cevfsAutoDetect(void *pCtx, const char *zFile, const char *zHdr, size_t *pEncIvSz, CevfsMethods *pMethods) {
+  *pEncIvSz = kCCBlockSizeAES128;
   pMethods->xCompressBound = cevfsCompressBound;
   pMethods->xCompress = cevfsCompress;;
   pMethods->xUncompress = cevfsUncompress;
-  // *pEncIvSz = kCCBlockSizeAES128;
-  // pMethods->xEncrypt = cevfsEncrypt;
-  // pMethods->xDecrypt = cevfsDecrypt;
+  pMethods->xEncrypt = cevfsEncrypt;
+  pMethods->xDecrypt = cevfsDecrypt;
   return true;
 }
