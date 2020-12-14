@@ -63,6 +63,18 @@ SOFTWARE.
 #define CEVFS_PRINTF(a,b,...)
 #endif
 
+SQLITE_PRIVATE int sqlite3PagerCloseShim(Pager *pPager, sqlite3* db){
+#if SQLITE_VERSION_NUMBER < 3016000
+  return sqlite3PagerClose(pPager);
+#else
+  return sqlite3PagerClose(pPager, db);
+#endif
+}
+
+#ifndef EXTRA_SIZE
+#define EXTRA_SIZE sizeof(MemPage)
+#endif
+
 // Compression size and offset types
 typedef u16 CevfsCmpSize;
 typedef u16 CevfsCmpOfst;
@@ -140,6 +152,7 @@ struct cevfs_info {
   const char *zVfsName;                // Name of this VFS
   sqlite3_vfs *pCevfsVfs;              // Pointer back to the cevfs VFS
   cevfs_file *pFile;                   // Pointer back to the cevfs_file representing the dest. db.
+  sqlite3 *pDb;                        // Pointer to sqlite3 instance
   int cerod_activated;                 // if extension is enabled, make sure read only
 
   // Pointers to custom compress/encryption functions implemented by the user
@@ -914,7 +927,7 @@ static int cevfsClose(sqlite3_file *pFile){
 
     if( rc==SQLITE_OK ){
       cevfsReleasePage1(p);
-      if( (rc = sqlite3PagerClose(p->pPager))==SQLITE_OK ){
+      if( (rc = sqlite3PagerCloseShim(p->pPager, pInfo->pDb))==SQLITE_OK ){
         p->pPager = NULL;
         if( p->zUppJournalPath ){
           sqlite3_free(p->zUppJournalPath);
@@ -1123,7 +1136,7 @@ static int cevfsWrite(
           cevfsPageMapSet(p, iOfst, nSrcAmt, &uppPgno, &mappedPgno, &cmprPgOfst);
 
           // write
-          if( (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0))==SQLITE_OK ){
+          if( rc==SQLITE_OK && (rc = sqlite3PagerGet(p->pPager, mappedPgno, &pPage, 0))==SQLITE_OK ){
             CevfsMemPage *pMemPage = memPageFromDbPage(pPage, mappedPgno);
             if( rc==SQLITE_OK && (rc = cevfsPagerWrite(p, pPage))==SQLITE_OK ){
               CEVFS_PRINTF(
@@ -1871,6 +1884,9 @@ int cevfs_build(
                 pInfo->upperPgSize = pageSize;
 
                 if( (rc = sqlite3_open_v2(zDestFilename, &pDb, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE, vfsName))==SQLITE_OK ){
+                 // Needed for sqlite3 API shims
+                 pInfo->pDb = pDb;
+
                   DbPage *pPage1 = NULL;
                   // import all pages
                   for(Pgno pgno=0; pgno<pageCount; pgno++){
@@ -1894,7 +1910,7 @@ int cevfs_build(
                     }
                   }
                   if (pPage1) sqlite3PagerUnref(pPage1);
-                  sqlite3PagerClose(pPager);
+                  sqlite3PagerCloseShim(pPager, pDb);
                   rc = sqlite3_close(pDb);
                 }
               }
