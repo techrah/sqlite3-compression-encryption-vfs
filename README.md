@@ -117,7 +117,7 @@ SQLITE_API void SQLITE_STDCALL sqlite3_activate_cerod(const char *zPassPhrase);
 If you are using CEVFS, chances are that you are _not_ currently making use of this API hook. You can use the `const char *` param to pass something other than the intended activation key, such as the encryption key. This `sqlite3_activate_cerod` function has been implemented in `cevfs_build/cevfs_mod.c` as an example. Alternatively, you can roll out your own [Run-Time Loadable Extension](http://www.sqlite.org/loadext.html).
 
 ## Limitations
-1. Currently tested with SQLite version 3.10.2 only.
+
 - WAL mode is not (yet) supported.
 - Free nodes are not managed which could result in wasted space. Not an issue if the database you create with `cevfs_build()` is intended to be used as a read-only database.
 - VACUUM not yet implemented to recover lost space.
@@ -126,10 +126,10 @@ If you are using CEVFS, chances are that you are _not_ currently making use of t
 
 |Version|Combatibility|
 |-|-|
-|3.10.2|Most development was originally on this version|
-|3.11.x|OK|
-|3.12.0 - 3.15.2|CEVFS recently fixed for these versions|
-|3.16.0 and higher|Not compatible yet due to API changes|
+|3.10.2|Most development was originally with this version.|
+|3.11.x|Testing OK. No changes were required.|
+|3.12.0 - 3.15.2|Default pager page size changed. CEVFS updated for these versions.|
+|3.16.0 - 3.34.0|`sqlite3PagerClose` API signature changed: CEVFS updated for these versions.|
 
 ## Contributing to the project
 If you would like to contribute back to the project, please fork the repo and submit pull requests. For more information, please read this [wiki page](https://github.com/ryanhomer/sqlite3-compression-encryption-vfs/wiki/Developing-in-Xcode)
