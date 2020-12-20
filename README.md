@@ -10,15 +10,8 @@ CEVFS gives you convenient hooks into SQLite that allow you to easily implement 
 CEVFS is a [SQLite Virtual File System](http://www.sqlite.org/vfs.html) which uses its own pager and is inserted between the pager used by the b-tree (herein referred to as the upper pager) and the OS interface. This allows it to intercept the read/write operations to the database and seamlessly compress/decompress and encrypt/decrypt the data. See "[How ZIPVFS Works](http://www.sqlite.org/zipvfs/doc/trunk/www/howitworks.wiki)" for more details. Unlike ZIPVFS, the page size of the pager used by CEVFS (herein referred to as the lower pager) is determined when the CEVFS database is created and is a persistent property of the database. WAL mode is not yet supported.
 
 ## How To Build
-The `cevfs.workspace` Xcode workspace shows how you can use the SQLite Split Amalgamation files to add the SQLite and CEVFS source directly to your project. My creating a separate project for SQlite+CEVFS vs. your main app, you can adjust the build setting independently.
-
-For illustration, here's how you could do it command-line style:
 
 #### Get the SQLite Source Code
-Currently, it is recommended that you use SQLite version 3.10.2. It is a known issue that CEVFS currently does _not_ work properly with SQLite version 3.13.0. Other versions haven't been tested yet. This will be resolved in a future release.
-
-It's a little tricky obtaining previous releases of SQLite as you now have to get them directly from the source code repository which generates the Zip or Tarball on the fly.
-
 1. Go to the [Downloads page](http://www.sqlite.org/download.html).
 1. Select one of the geographically located sites ([Dallas TX](http://www.sqlite.org/cgi/src), [Newark NJ](http://www2.sqlite.org/cgi/src), [Fremont CA](http://www3.sqlite.org/cgi/src)) from the Source Code Repositories section at the bottom of the page.
 1. Select the **Tags** tab at the top of the page.
@@ -114,7 +107,7 @@ By specifying `SQLITE_ENABLE_CEROD` we can make use of an API hook that's built 
 SQLITE_API void SQLITE_STDCALL sqlite3_activate_cerod(const char *zPassPhrase);
 ```
 
-If you are using CEVFS, chances are that you are _not_ currently making use of this API hook. You can use the `const char *` param to pass something other than the intended activation key, such as the encryption key. This `sqlite3_activate_cerod` function has been implemented in `cevfs_build/cevfs_mod.c` as an example. Alternatively, you can roll out your own [Run-Time Loadable Extension](http://www.sqlite.org/loadext.html).
+If you are using CEVFS, chances are that you are _not_ currently making use of this API hook. You can use the `const char *` param to pass something other than the intended activation key, such as the encryption key. This `sqlite3_activate_cerod` function has been implemented in `cevfs_build/cevfs_mod.c` as an example. Alternatively, you can roll out your own [Run-Time Loadable Extension](http://www.sqlite.org/loadext.html) for use with a standard SQLite 3 build.
 
 ## Limitations
 
@@ -122,7 +115,7 @@ If you are using CEVFS, chances are that you are _not_ currently making use of t
 - Free nodes are not managed which could result in wasted space. Not an issue if the database you create with `cevfs_build()` is intended to be used as a read-only database.
 - VACUUM not yet implemented to recover lost space.
 
-## Compatible Versions
+## SQLite3 Compatible Versions
 
 |Version|Combatibility|
 |-|-|
