@@ -34,11 +34,7 @@ SOFTWARE.
 #include "btreeInt.h"
 #endif
 #include <sys/stat.h>
-#include <zlib.h>
 #include "cevfs.h"
-
-#include <CommonCrypto/CommonDigest.h>
-#include <CommonCrypto/CommonCryptor.h>
 
 // Standard Sqlite3 pager header
 #define CEVFS_DB_HEADER1_OFST      000
